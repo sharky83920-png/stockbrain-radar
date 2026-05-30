@@ -2,6 +2,12 @@
 import sys
 from pathlib import Path
 
+# Windows 終端機預設 cp950，中文/emoji 會壞，強制 UTF-8 輸出
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data import finmind_client as fm
