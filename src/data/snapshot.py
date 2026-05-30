@@ -126,6 +126,30 @@ def _fundamentals_section(sid: str) -> dict[str, Any]:
         if rev_q:
             out["latest_quarter"] = rev_q[0]
 
+        # 三率（毛利率 / 營業利益率 / 淨利率）近 5 季 + 三率三升判斷
+        rev_s = dict(_quarterly_series(fs, "Revenue"))
+        gp_s = dict(_quarterly_series(fs, "GrossProfit"))
+        oi_s = dict(_quarterly_series(fs, "OperatingIncome"))
+        ni_s = dict(_quarterly_series(fs, "IncomeAfterTaxes"))
+        qdates = [d for d in sorted(rev_s) if rev_s.get(d)]
+        margins = []
+        for d in qdates[-5:]:
+            r = rev_s[d]
+            margins.append({
+                "q": d,
+                "gross": round(gp_s[d] / r * 100, 1) if d in gp_s else None,
+                "op": round(oi_s[d] / r * 100, 1) if d in oi_s else None,
+                "net": round(ni_s[d] / r * 100, 1) if d in ni_s else None,
+            })
+        out["margins_series"] = margins
+        if margins:
+            out["net_margin_pct"] = margins[-1]["net"]
+        if len(margins) >= 2:
+            a, b = margins[-2], margins[-1]
+            ups = {k: (b[k] is not None and a[k] is not None and b[k] > a[k]) for k in ("gross", "op", "net")}
+            out["three_rates_rising"] = all(ups.values())
+            out["three_rates_detail"] = ups
+
     # 資產負債：負債比 + ROE
     bs = fm.balance_sheet(sid, days=500)
     if not bs.empty:

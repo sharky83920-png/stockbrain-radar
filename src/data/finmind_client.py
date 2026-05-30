@@ -130,3 +130,19 @@ def dividend(data_id: str, days: int = 1500) -> pd.DataFrame:
 def news(data_id: str, days: int = 14) -> pd.DataFrame:
     """個股相關新聞（date / source / title / link）。"""
     return fetch("TaiwanStockNews", data_id, _default_start(days))
+
+
+def stock_info(data_id: str) -> pd.DataFrame:
+    """個股基本資訊（stock_name / industry_category）。"""
+    return fetch("TaiwanStockInfo", data_id, max_age_days=30)
+
+
+def stock_name(data_id: str) -> str | None:
+    """回傳股票中文名稱，查不到回 None。"""
+    try:
+        info = stock_info(data_id)
+        if not info.empty:
+            return str(info.iloc[0]["stock_name"])
+    except Exception:
+        pass
+    return None

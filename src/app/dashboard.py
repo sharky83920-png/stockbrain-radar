@@ -2,6 +2,7 @@
 
 啟動：streamlit run src/app/dashboard.py
 """
+import re
 import sys
 from pathlib import Path
 
@@ -35,7 +36,9 @@ HELP = {
     "eps_ttm": "每股盈餘 EPS（Earnings Per Share）近四季加總（TTM＝Trailing Twelve Months）。",
     "gross": "毛利率 = 毛利 ÷ 營收。反映產品本身的賺錢能力。",
     "op": "營業利益率 = 營業利益 ÷ 營收。扣掉營業費用後的本業獲利能力。",
+    "net": "淨利率 = 稅後淨利 ÷ 營收。最終獲利能力。毛利率/營益率/淨利率三者同步上升＝『三率三升』，是基本面轉強的訊號。",
     "debt": "負債比 = 總負債 ÷ 總資產。<60% 較安全。",
+    "target": "分析師目標價：免費資料源沒有結構化的各券商目標價（屬付費資料），此處以程式從近期新聞標題擷取『目標價/上看 ___ 元』，屬 best-effort，量取決於新聞多寡（填 FinMind token 會更多）。",
     "foreign_net": "外資（外國機構投資人）近 N 個交易日買進張數減賣出張數。正=買超，負=賣超。",
     "trust_net": "投信（國內投資信託／基金）近 N 個交易日淨買賣張數。投信動向偏中線、較敏感。",
     "foreign_hold": "外資持股比例 = 外資持有股數 ÷ 總發行股數。",
@@ -66,6 +69,41 @@ def _news(sid: str):
     return fm.news(sid, days=21).sort_values("date", ascending=False)
 
 
+@st.cache_data(ttl=86400)
+def _name(sid: str):
+    return fm.stock_name(sid)
+
+
+# 從新聞標題擷取「目標價/上看/看到 ___ 元」（best-effort，免費資料無結構化券商目標價）
+_TP_PATTERNS = [
+    r"目標價[^0-9]{0,8}([0-9]{2,5}(?:\.[0-9])?)",
+    r"上看[^0-9]{0,4}([0-9]{2,5})\s*元",
+    r"看[到上][^0-9]{0,4}([0-9]{2,5})\s*元",
+]
+_BROKERS = ["大摩", "小摩", "摩根", "高盛", "瑞銀", "美林", "花旗", "野村", "瑞信", "麥格理",
+            "外資", "投信", "里昂", "傑富瑞", "匯豐", "星展", "凱基", "元大", "富邦"]
+
+
+def _extract_target_prices(news_df):
+    rows = []
+    for _, r in news_df.iterrows():
+        title = str(r["title"])
+        prices = []
+        for pat in _TP_PATTERNS:
+            prices += re.findall(pat, title)
+        if not prices:
+            continue
+        broker = next((b for b in _BROKERS if b in title), "—")
+        rows.append({
+            "date": str(r["date"])[:10],
+            "來源/券商": broker,
+            "目標價": "、".join(sorted(set(prices), key=lambda x: float(x))),
+            "title": title,
+            "link": r["link"],
+        })
+    return rows
+
+
 def _metric(col, label, value, suffix="", help_=None):
     txt = "—" if value is None else f"{value}{suffix}"
     col.metric(label, txt, help=help_)
@@ -87,7 +125,8 @@ fund = snap.get("fundamentals", {})
 val = snap.get("valuation", {})
 
 # --- Header ----------------------------------------------------------------
-st.title(f"{sid} 個股研究")
+_nm = _name(sid)
+st.title(f"{_nm}({sid}) 個股研究" if _nm else f"{sid} 個股研究")
 if isinstance(price, dict) and "close" in price:
     c1, c2, c3, c4, c5 = st.columns(5)
     _metric(c1, "收盤價", price.get("close"))
@@ -146,12 +185,35 @@ with tab_chip:
 # --- 基本面 ----------------------------------------------------------------
 with tab_fund:
     if isinstance(fund, dict) and "error" not in fund:
-        a, b, c, d = st.columns(4)
+        a, b, c, d, e = st.columns(5)
         _metric(a, "毛利率", fund.get("gross_margin_pct"), "%", help_=HELP["gross"])
         _metric(b, "營業利益率", fund.get("operating_margin_pct"), "%", help_=HELP["op"])
-        _metric(c, "負債比", fund.get("debt_ratio_pct"), "%", help_=HELP["debt"])
-        _metric(d, "每股盈餘 EPS（近四季）", fund.get("eps_ttm"), help_=HELP["eps_ttm"])
+        _metric(c, "淨利率", fund.get("net_margin_pct"), "%", help_=HELP["net"])
+        _metric(d, "負債比", fund.get("debt_ratio_pct"), "%", help_=HELP["debt"])
+        _metric(e, "每股盈餘 EPS（近四季）", fund.get("eps_ttm"), help_=HELP["eps_ttm"])
         st.caption(f"最新財報季：{fund.get('latest_quarter')}　EPS 年增率（與去年同季比）：{fund.get('eps_yoy_pct')}%")
+
+        # 三率三升判斷
+        if "three_rates_rising" in fund:
+            detail = fund.get("three_rates_detail", {})
+            def _ud(k, label):
+                return f"{label}{'↑' if detail.get(k) else '↓/持平'}"
+            tag = "　".join([_ud("gross", "毛利率"), _ud("op", "營益率"), _ud("net", "淨利率")])
+            if fund["three_rates_rising"]:
+                st.success(f"✅ **三率三升**（最新季 vs 前一季）：{tag}", icon="✅")
+            else:
+                st.warning(f"⚠️ 非三率三升（最新季 vs 前一季）：{tag}", icon="⚠️")
+
+        # 三率趨勢圖
+        ms = fund.get("margins_series") or []
+        if len(ms) >= 2:
+            mdf = pd.DataFrame(ms).rename(columns={"gross": "毛利率", "op": "營業利益率", "net": "淨利率"})
+            long = mdf.melt(id_vars="q", value_vars=["毛利率", "營業利益率", "淨利率"],
+                            var_name="指標", value_name="百分比")
+            fig = px.line(long, x="q", y="百分比", color="指標", markers=True,
+                          title="三率趨勢（近五季，%）")
+            fig.update_layout(xaxis_title="財報季", yaxis_title="%")
+            st.plotly_chart(fig, width="stretch")
         st.divider()
         col1, col2 = st.columns(2)
         rev = fund.get("revenue_yoy_recent") or []
@@ -224,6 +286,22 @@ with tab_val:
             st.caption(f"PER 帶倍數（取近三年歷史百分位）：{mults}　｜　目前 PER {band.get('current_per')} 倍")
         else:
             st.info("此檔資料不足以繪製本益比河流圖（可能 EPS 為負或歷史太短）。")
+
+        # 分析師目標價（從新聞擷取，best-effort）
+        st.divider()
+        st.markdown("#### 🎯 分析師目標價", help=HELP["target"])
+        news_tp = _news(sid)
+        tps = _extract_target_prices(news_tp) if news_tp is not None and not news_tp.empty else []
+        if tps:
+            tdf = pd.DataFrame(tps)
+            st.dataframe(
+                tdf[["date", "來源/券商", "目標價", "title"]],
+                width="stretch", hide_index=True,
+                column_config={"title": "新聞標題"},
+            )
+        else:
+            st.info("近期新聞中未擷取到明確目標價數字。註：免費資料源沒有結構化的各券商目標價（屬付費資料），"
+                    "此功能靠新聞擷取，量取決於新聞多寡——填 FinMind token 後新聞變多會更有料。")
     else:
         st.warning(f"估值資料讀取問題：{val.get('error') if isinstance(val, dict) else val}")
 
