@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.analysis.valuation import pe_band
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
+from src.data import news_sources
 from src.data.snapshot import build_snapshot
 
 # 投顧/法人相關新聞的過濾關鍵字（MoneyDJ 免費研究報告區已停更至 2011，改用新聞過濾）
@@ -64,14 +65,14 @@ def _pe_band(sid: str):
     return pe_band(sid)
 
 
-@st.cache_data(ttl=3600)
-def _news(sid: str):
-    return fm.news(sid, days=21).sort_values("date", ascending=False)
-
-
 @st.cache_data(ttl=86400)
 def _name(sid: str):
     return fm.stock_name(sid)
+
+
+@st.cache_data(ttl=1800)
+def _news(sid: str):
+    return news_sources.get_news(sid, _name(sid), days=21)
 
 
 # 從新聞標題擷取「目標價/上看/看到 ___ 元」（best-effort，免費資料無結構化券商目標價）
@@ -309,7 +310,7 @@ with tab_val:
 with tab_news:
     news = _news(sid)
     if news is not None and not news.empty:
-        st.caption(f"近 21 天共 {len(news)} 則（來源：FinMind 聚合）")
+        st.caption(f"共 {len(news)} 則（來源：Google News + FinMind 整合去重）")
         _ai_summary_block(list(news.head(40)["title"]), "news")
         st.divider()
         for _, r in news.head(40).iterrows():
