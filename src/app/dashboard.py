@@ -14,7 +14,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.analysis.valuation import pe_band
 from src.data import finmind_client as fm
+from src.data import gemini_client as gem
 from src.data.snapshot import build_snapshot
+
+# 投顧/法人相關新聞的過濾關鍵字（MoneyDJ 免費研究報告區已停更至 2011，改用新聞過濾）
+ANALYST_KEYWORDS = [
+    "目標價", "評等", "調升", "調降", "上修", "下修", "升評", "降評", "外資", "投顧",
+    "加碼", "減碼", "買進", "賣出", "中立", "看好", "出具", "報告", "喊", "上調", "下調",
+    "大摩", "小摩", "摩根", "高盛", "瑞銀", "美林", "花旗", "野村", "瑞信", "麥格理",
+]
 
 st.set_page_config(page_title="StockBrain Radar", page_icon="📡", layout="wide")
 
@@ -93,8 +101,21 @@ else:
     st.error(f"查無 {sid} 的價格資料，請確認代號。")
 
 tab_chip, tab_fund, tab_val, tab_news, tab_report = st.tabs(
-    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧報告"]
+    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向"]
 )
+
+
+def _ai_summary_block(titles, key_suffix):
+    """共用：一顆 AI 摘要按鈕 + 結果。"""
+    if not gem.is_configured():
+        st.caption("🤖 AI 摘要：請在專案 `.env` 設定 `GEMINI_KEY`（與你 GAS 晨報同一把）後即可使用。")
+        return
+    if st.button("🤖 用 AI 摘要這些內容", key=f"ai_{key_suffix}"):
+        with st.spinner("Gemini 摘要中…"):
+            try:
+                st.success(gem.summarize_news(titles, sid))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"摘要失敗：{type(e).__name__}: {e}")
 
 # --- 籌碼面 ----------------------------------------------------------------
 with tab_chip:
@@ -211,21 +232,35 @@ with tab_news:
     news = _news(sid)
     if news is not None and not news.empty:
         st.caption(f"近 21 天共 {len(news)} 則（來源：FinMind 聚合）")
+        _ai_summary_block(list(news.head(40)["title"]), "news")
+        st.divider()
         for _, r in news.head(40).iterrows():
             d = str(r["date"])[:16]
             st.markdown(f"- `{d}` **[{r['source']}]** [{r['title']}]({r['link']})")
     else:
         st.info("近期查無相關新聞。")
-    st.caption("📝 AI 摘要功能規劃中（需接 LLM，見投顧報告分頁說明）。")
 
-# --- 投顧報告 --------------------------------------------------------------
+# --- 投顧動向 --------------------------------------------------------------
 with tab_report:
-    st.info(
-        "**投顧報告 + AI 摘要：開發中（Phase 5）**\n\n"
-        "FinMind 沒有提供投顧／法人研究報告，需另外爬取（如 MoneyDJ 研究報告區），"
-        "且「摘要」需要接 LLM（可沿用你 GAS 晨報的 Gemini）。\n\n"
-        "待確認：①報告來源 ②摘要用哪個 LLM。確認後會補上這一欄與新聞的 AI 摘要。"
+    st.caption(
+        "ℹ️ MoneyDJ 免費研究報告區已停更（僅存 2011 年前存檔），故改以「近期新聞中與投顧/"
+        "法人/目標價/評等相關者」呈現分析師動向。"
     )
+    news = _news(sid)
+    if news is not None and not news.empty:
+        mask = news["title"].str.contains("|".join(ANALYST_KEYWORDS), na=False)
+        hits = news[mask]
+        if not hits.empty:
+            st.caption(f"過濾出 {len(hits)} 則投顧/法人相關")
+            _ai_summary_block(list(hits.head(30)["title"]), "report")
+            st.divider()
+            for _, r in hits.head(30).iterrows():
+                d = str(r["date"])[:16]
+                st.markdown(f"- `{d}` **[{r['source']}]** [{r['title']}]({r['link']})")
+        else:
+            st.info("近期新聞中沒有明顯的投顧/法人/目標價相關內容。")
+    else:
+        st.info("近期查無新聞。")
 
 st.sidebar.divider()
 st.sidebar.caption("⚠️ 僅供個人研究，非投資建議。")
