@@ -41,6 +41,23 @@ def google_news(query: str, limit: int = 80) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_COLS)
 
 
+def target_price_news(stock_id: str, name: str | None = None) -> pd.DataFrame:
+    """專門搜『目標價/評等』相關新聞，補強目標價擷取。"""
+    base = name or stock_id
+    frames = []
+    for kw in ("目標價", "評等 外資", "投顧 看好"):
+        try:
+            g = google_news(f"{base} {kw}", limit=40)
+            if not g.empty:
+                frames.append(g)
+        except Exception:
+            pass
+    if not frames:
+        return pd.DataFrame(columns=_COLS)
+    df = pd.concat(frames, ignore_index=True)
+    return df.drop_duplicates(subset="title").sort_values("date", ascending=False).reset_index(drop=True)
+
+
 def get_news(stock_id: str, name: str | None = None, days: int = 21) -> pd.DataFrame:
     """整合新聞：Google News（用『股名 代號』搜尋）+ FinMind，去重後依日期排序。"""
     frames = []

@@ -13,6 +13,8 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.analysis import industry as industry_mod
+from src.analysis import news_digest
 from src.analysis.valuation import pe_band
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
@@ -75,30 +77,68 @@ def _news(sid: str):
     return news_sources.get_news(sid, _name(sid), days=21)
 
 
-# 從新聞標題擷取「目標價/上看/看到 ___ 元」（best-effort，免費資料無結構化券商目標價）
+@st.cache_data(ttl=1800)
+def _tp_news(sid: str):
+    """目標價專用新聞（專搜 + 一般合併），給目標價擷取用。"""
+    import pandas as _pd
+    a = news_sources.target_price_news(sid, _name(sid))
+    b = _news(sid)
+    frames = [d for d in (a, b) if d is not None and not d.empty]
+    if not frames:
+        return _pd.DataFrame()
+    return _pd.concat(frames, ignore_index=True).drop_duplicates(subset="title")
+
+
+# 從新聞標題擷取「目標價/上看/看到/調升至 ___ 元」（best-effort，免費資料無結構化券商目標價）
 _TP_PATTERNS = [
-    r"目標價[^0-9]{0,8}([0-9]{2,5}(?:\.[0-9])?)",
-    r"上看[^0-9]{0,4}([0-9]{2,5})\s*元",
-    r"看[到上][^0-9]{0,4}([0-9]{2,5})\s*元",
+    r"目標價[^0-9]{0,10}([0-9][0-9,]{1,5}(?:\.[0-9])?)",
+    r"上看[^0-9]{0,6}([0-9][0-9,]{1,5})",
+    r"看[到上][^0-9]{0,6}([0-9][0-9,]{1,5})\s*元",
+    r"(?:調升|上修|喊上|上調|調漲)[^0-9]{0,8}([0-9][0-9,]{1,5})\s*元",
 ]
-_BROKERS = ["大摩", "小摩", "摩根", "高盛", "瑞銀", "美林", "花旗", "野村", "瑞信", "麥格理",
-            "外資", "投信", "里昂", "傑富瑞", "匯豐", "星展", "凱基", "元大", "富邦"]
+_BROKERS = ["大摩", "小摩", "摩根士丹利", "摩根大通", "摩根", "高盛", "瑞銀", "UBS", "美林", "花旗",
+            "野村", "瑞信", "麥格理", "里昂", "傑富瑞", "Jefferies", "匯豐", "星展", "巴克萊",
+            "德意志", "Factset", "凱基", "元大", "富邦", "群益", "中信", "第一金", "兆豐", "外資",
+            "投信", "法人", "分析師", "杜金龍"]
 
 
-def _extract_target_prices(news_df):
+def _extract_target_prices(news_df, ref_price=None):
+    lo = hi = None
+    if ref_price:
+        lo, hi = ref_price * 0.4, ref_price * 2.6  # 合理區間，濾掉同篇其他個股的目標價
     rows = []
+    seen = set()
     for _, r in news_df.iterrows():
         title = str(r["title"])
+        if "目標價" not in title and "上看" not in title and not re.search(r"看[到上].{0,6}元", title):
+            continue
         prices = []
         for pat in _TP_PATTERNS:
-            prices += re.findall(pat, title)
+            prices += [p.replace(",", "") for p in re.findall(pat, title)]
+        vals = []
+        for p in prices:
+            try:
+                v = float(p)
+            except ValueError:
+                continue
+            if v < 10:
+                continue
+            if lo and not (lo <= v <= hi):
+                continue
+            vals.append(p)
+        prices = vals
         if not prices:
             continue
-        broker = next((b for b in _BROKERS if b in title), "—")
+        broker = next((b for b in _BROKERS if b in title), None) or str(r.get("source", "—"))
+        price_str = "、".join(sorted(set(prices), key=lambda x: float(x)))
+        key = (broker, price_str)
+        if key in seen:
+            continue
+        seen.add(key)
         rows.append({
             "date": str(r["date"])[:10],
             "來源/券商": broker,
-            "目標價": "、".join(sorted(set(prices), key=lambda x: float(x))),
+            "目標價": price_str,
             "title": title,
             "link": r["link"],
         })
@@ -132,7 +172,9 @@ if isinstance(price, dict) and "close" in price:
     c1, c2, c3, c4, c5 = st.columns(5)
     _metric(c1, "收盤價", price.get("close"))
     delta = price.get("change_pct")
-    c2.metric("漲跌幅", f"{price.get('change')}", f"{delta}%" if delta is not None else None)
+    # 台股慣例：上漲紅、下跌綠 → delta_color="inverse"（Streamlit 預設是美股的漲綠跌紅）
+    c2.metric("漲跌幅", f"{price.get('change')}", f"{delta}%" if delta is not None else None,
+              delta_color="inverse")
     _metric(c3, "本益比 PER", val.get("per") if isinstance(val, dict) else None, help_=HELP["per"])
     _metric(c4, "本益成長比 PEG", val.get("peg") if isinstance(val, dict) else None, help_=HELP["peg"])
     _metric(c5, "ROE 股東權益報酬率(近四季)", fund.get("roe_ttm_pct") if isinstance(fund, dict) else None, "%", help_=HELP["roe"])
@@ -140,22 +182,24 @@ if isinstance(price, dict) and "close" in price:
 else:
     st.error(f"查無 {sid} 的價格資料，請確認代號。")
 
-tab_chip, tab_fund, tab_val, tab_news, tab_report = st.tabs(
-    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向"]
+tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry = st.tabs(
+    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈"]
 )
 
 
-def _ai_summary_block(titles, key_suffix):
-    """共用：一顆 AI 摘要按鈕 + 結果。"""
-    if not gem.is_configured():
-        st.caption("🤖 AI 摘要：請在專案 `.env` 設定 `GEMINI_KEY`（與你 GAS 晨報同一把）後即可使用。")
-        return
-    if st.button("🤖 用 AI 摘要這些內容", key=f"ai_{key_suffix}"):
-        with st.spinner("Gemini 摘要中…"):
-            try:
-                st.success(gem.summarize_news(titles, sid))
-            except Exception as e:  # noqa: BLE001
-                st.error(f"摘要失敗：{type(e).__name__}: {e}")
+def _ai_summary_block(news_df, key_suffix):
+    """共用：免金鑰重點整理（永遠顯示）+ Gemini 深度摘要（有 key 才有）。"""
+    with st.expander("📋 重點整理（免 AI，依主題自動分類）", expanded=True):
+        st.markdown(news_digest.digest(news_df))
+    if gem.is_configured():
+        if st.button("🤖 用 AI 生成深度摘要", key=f"ai_{key_suffix}"):
+            with st.spinner("Gemini 摘要中…"):
+                try:
+                    st.success(gem.summarize_news(list(news_df["title"]), sid))
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"摘要失敗：{type(e).__name__}: {e}")
+    else:
+        st.caption("🤖 AI 深度摘要：在 `.env` 填 `GEMINI_KEY`（與 GAS 晨報同一把）並重啟 dashboard 後解鎖。")
 
 # --- 籌碼面 ----------------------------------------------------------------
 with tab_chip:
@@ -291,8 +335,9 @@ with tab_val:
         # 分析師目標價（從新聞擷取，best-effort）
         st.divider()
         st.markdown("#### 🎯 分析師目標價", help=HELP["target"])
-        news_tp = _news(sid)
-        tps = _extract_target_prices(news_tp) if news_tp is not None and not news_tp.empty else []
+        tp_news = _tp_news(sid)  # 專門搜目標價的新聞 + 一般新聞
+        _ref = price.get("close") if isinstance(price, dict) else None
+        tps = _extract_target_prices(tp_news, _ref) if tp_news is not None and not tp_news.empty else []
         if tps:
             tdf = pd.DataFrame(tps)
             st.dataframe(
@@ -300,6 +345,7 @@ with tab_val:
                 width="stretch", hide_index=True,
                 column_config={"title": "新聞標題"},
             )
+            st.caption("※ 自動從新聞標題擷取，已用現價 0.4~2.6 倍過濾；仍可能含同篇提及的其他個股，請點原文核對。")
         else:
             st.info("近期新聞中未擷取到明確目標價數字。註：免費資料源沒有結構化的各券商目標價（屬付費資料），"
                     "此功能靠新聞擷取，量取決於新聞多寡——填 FinMind token 後新聞變多會更有料。")
@@ -311,7 +357,7 @@ with tab_news:
     news = _news(sid)
     if news is not None and not news.empty:
         st.caption(f"共 {len(news)} 則（來源：Google News + FinMind 整合去重）")
-        _ai_summary_block(list(news.head(40)["title"]), "news")
+        _ai_summary_block(news.head(50), "news")
         st.divider()
         for _, r in news.head(40).iterrows():
             d = str(r["date"])[:16]
@@ -331,7 +377,7 @@ with tab_report:
         hits = news[mask]
         if not hits.empty:
             st.caption(f"過濾出 {len(hits)} 則投顧/法人相關")
-            _ai_summary_block(list(hits.head(30)["title"]), "report")
+            _ai_summary_block(hits.head(30), "report")
             st.divider()
             for _, r in hits.head(30).iterrows():
                 d = str(r["date"])[:16]
@@ -340,6 +386,51 @@ with tab_report:
             st.info("近期新聞中沒有明顯的投顧/法人/目標價相關內容。")
     else:
         st.info("近期查無新聞。")
+
+# --- 產業 / 供應鏈 ---------------------------------------------------------
+with tab_industry:
+    info = fm.stock_info(sid)
+    cats = sorted(set(info["industry_category"].dropna())) if not info.empty else []
+    st.markdown(f"**產業分類：** {('、'.join(cats)) if cats else '—'}")
+    view = None
+    for c in cats:
+        view = industry_mod.get_industry_view(c) or view
+    if view:
+        st.info(view["desc"])
+        u, m, d = st.columns(3)
+        with u:
+            st.markdown("##### ⬆️ 上游")
+            for seg, stocks in view["upstream"]:
+                st.markdown(f"**{seg}**\n\n{stocks}")
+        with m:
+            st.markdown("##### ↔️ 中游")
+            for seg, stocks in view["midstream"]:
+                st.markdown(f"**{seg}**\n\n{stocks}")
+        with d:
+            st.markdown("##### ⬇️ 下游")
+            for seg, stocks in view["downstream"]:
+                st.markdown(f"**{seg}**\n\n{stocks}")
+        st.caption("※ 上下游與代表個股為靜態整理，僅供建立產業輪廓參考。")
+    else:
+        st.warning(f"尚未內建「{('、'.join(cats)) or '此'}」產業的供應鏈整理。")
+
+    # AI 生成本公司產業地位與上下游
+    st.divider()
+    if gem.is_configured():
+        if st.button("🤖 用 AI 生成本公司的產業地位與上下游"):
+            with st.spinner("Gemini 生成中…"):
+                try:
+                    prompt = (
+                        f"請用繁體中文，針對台股 {_name(sid) or ''}({sid})，"
+                        f"簡述：①它在所屬產業（{'、'.join(cats)}）的定位與市佔/競爭力 "
+                        f"②上游供應商類型與代表台股 ③下游客戶/應用與代表台股 ④主要競爭對手。"
+                        f"條列、精簡、避免投資建議。"
+                    )
+                    st.success(gem.generate(prompt))
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"生成失敗：{type(e).__name__}: {e}")
+    else:
+        st.caption("🤖 想要『本公司』量身的產業地位與上下游分析？填 `.env` 的 `GEMINI_KEY` 並重啟後即可一鍵生成。")
 
 st.sidebar.divider()
 st.sidebar.caption("⚠️ 僅供個人研究，非投資建議。")
