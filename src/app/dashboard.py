@@ -19,6 +19,7 @@ from src.analysis.valuation import pe_band
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
 from src.data import news_sources
+from src.data import watchlist
 from src.data.snapshot import build_snapshot
 
 # 投顧/法人相關新聞的過濾關鍵字（MoneyDJ 免費研究報告區已停更至 2011，改用新聞過濾）
@@ -70,6 +71,26 @@ def _pe_band(sid: str):
 @st.cache_data(ttl=86400)
 def _name(sid: str):
     return fm.stock_name(sid)
+
+
+@st.cache_data(ttl=1800)
+def _mini(sid: str):
+    """清單比較總表用的精簡快照。"""
+    s = _snapshot(sid)
+    p, c, f, v = (s.get(k, {}) for k in ("price", "chips", "fundamentals", "valuation"))
+    tr = "—"
+    if isinstance(f, dict) and "three_rates_rising" in f:
+        tr = "✅" if f["three_rates_rising"] else "❌"
+    return {
+        "代號": sid,
+        "名稱": _name(sid) or sid,
+        "收盤": p.get("close") if isinstance(p, dict) else None,
+        "漲跌%": p.get("change_pct") if isinstance(p, dict) else None,
+        "PER": v.get("per") if isinstance(v, dict) else None,
+        "外資20日(張)": c.get("foreign_net_20d_lots") if isinstance(c, dict) else None,
+        "投信20日(張)": c.get("trust_net_20d_lots") if isinstance(c, dict) else None,
+        "三率三升": tr,
+    }
 
 
 @st.cache_data(ttl=1800)
@@ -152,8 +173,42 @@ def _metric(col, label, value, suffix="", help_=None):
 
 # --- Sidebar ---------------------------------------------------------------
 st.sidebar.title("📡 StockBrain Radar")
-sid = st.sidebar.text_input("股票代號（如 2330）", value="2330").strip()
-st.sidebar.caption("資料來源：FinMind。當日快取，僅供個人研究。")
+st.session_state.setdefault("sid_input", "2330")
+sid = st.sidebar.text_input("股票代號（如 2330）", key="sid_input").strip()
+st.sidebar.caption("資料來源：FinMind / Google News。當日快取，僅供個人研究。")
+
+
+def _select_sid(s):
+    st.session_state.sid_input = s
+
+
+def _remove_sid(s):
+    watchlist.remove(s)
+
+
+def _add_current(s, nm):
+    watchlist.add(s, nm)
+
+
+# 我的清單（存 Obsidian vault，跨機同步）
+st.sidebar.divider()
+st.sidebar.subheader("⭐ 我的清單")
+_wl = watchlist.load()
+if _wl:
+    for _it in _wl:
+        c1, c2 = st.sidebar.columns([4, 1])
+        c1.button(f"{_it['name']}({_it['sid']})", key=f"wl_{_it['sid']}",
+                  width="stretch", on_click=_select_sid, args=(_it["sid"],))
+        c2.button("✕", key=f"rm_{_it['sid']}", on_click=_remove_sid, args=(_it["sid"],))
+else:
+    st.sidebar.caption("還沒有收藏，下方可加入。")
+
+if sid:
+    if watchlist.contains(sid):
+        st.sidebar.caption(f"✓ {sid} 已在清單")
+    else:
+        st.sidebar.button(f"⭐ 加入 {sid}", key="add_cur",
+                          on_click=_add_current, args=(sid, _name(sid)))
 
 if not sid:
     st.info("← 在左側輸入股票代號")
@@ -181,6 +236,15 @@ if isinstance(price, dict) and "close" in price:
     st.caption(f"資料日：{price.get('date')}　成交量：{price.get('volume_lots'):,} 張")
 else:
     st.error(f"查無 {sid} 的價格資料，請確認代號。")
+
+# 我的清單比較總表
+if _wl:
+    with st.expander(f"📋 我的清單比較總表（{len(_wl)} 檔）", expanded=False):
+        try:
+            st.dataframe(pd.DataFrame([_mini(i["sid"]) for i in _wl]),
+                         hide_index=True, width="stretch")
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"比較總表載入中或部分失敗：{e}")
 
 tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry = st.tabs(
     ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈"]
