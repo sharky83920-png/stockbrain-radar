@@ -110,13 +110,15 @@ def _tp_news(sid: str):
     return _pd.concat(frames, ignore_index=True).drop_duplicates(subset="title")
 
 
-# 從新聞標題擷取「目標價/上看/看到/調升至 ___ 元」（best-effort，免費資料無結構化券商目標價）
-_TP_PATTERNS = [
-    r"目標價[^0-9]{0,10}([0-9][0-9,]{1,5}(?:\.[0-9])?)",
-    r"上看[^0-9]{0,6}([0-9][0-9,]{1,5})",
-    r"看[到上][^0-9]{0,6}([0-9][0-9,]{1,5})\s*元",
-    r"(?:調升|上修|喊上|上調|調漲)[^0-9]{0,8}([0-9][0-9,]{1,5})\s*元",
-]
+# 嚴格擷取：觸發詞 + （5字內）數字 + 「元」。避免抓到年份(2027)、EPS(426元)等。
+_TP_RE = re.compile(
+    r"(?:目標價|上看|看到|上調至|調升至|上修至|喊上|喊到|調高至|上修)[^0-9元]{0,5}"
+    r"([0-9][0-9,]{1,5})(?:\.[0-9]+)?\s*元"
+)
+# 數字前若緊接這些字 → 不是目標價（是 EPS/獲利等）
+_TP_BAD_PREFIX = ("EPS", "eps", "獲利", "賺", "營收", "股本")
+# 出現這些比較語氣 → 標題在講「別檔」打敗本檔，數字多半是別檔的
+_TP_COMPARE = ("贏過", "不只", "勝過", "超車", "打敗", "海放")
 _BROKERS = ["大摩", "小摩", "摩根士丹利", "摩根大通", "摩根", "高盛", "瑞銀", "UBS", "美林", "花旗",
             "野村", "瑞信", "麥格理", "里昂", "傑富瑞", "Jefferies", "匯豐", "星展", "巴克萊",
             "德意志", "Factset", "凱基", "元大", "富邦", "群益", "中信", "第一金", "兆豐", "外資",
@@ -131,27 +133,26 @@ def _extract_target_prices(news_df, ref_price=None):
     seen = set()
     for _, r in news_df.iterrows():
         title = str(r["title"])
-        if "目標價" not in title and "上看" not in title and not re.search(r"看[到上].{0,6}元", title):
+        if any(w in title for w in _TP_COMPARE):  # 比較語氣 → 在講別檔，跳過
             continue
-        prices = []
-        for pat in _TP_PATTERNS:
-            prices += [p.replace(",", "") for p in re.findall(pat, title)]
         vals = []
-        for p in prices:
+        for m in _TP_RE.finditer(title):
+            before = title[max(0, m.start() - 4):m.start()]
+            if any(b in before for b in _TP_BAD_PREFIX):  # 數字前是 EPS/獲利 → 跳
+                continue
             try:
-                v = float(p)
+                v = float(m.group(1).replace(",", ""))
             except ValueError:
                 continue
-            if v < 10:
+            if v < 50:  # 目標價通常 ≥ 50
                 continue
             if lo and not (lo <= v <= hi):
                 continue
-            vals.append(p)
-        prices = vals
-        if not prices:
+            vals.append(str(int(v)))
+        if not vals:
             continue
         broker = next((b for b in _BROKERS if b in title), None) or str(r.get("source", "—"))
-        price_str = "、".join(sorted(set(prices), key=lambda x: float(x)))
+        price_str = "、".join(sorted(set(vals), key=lambda x: float(x)))
         key = (broker, price_str)
         if key in seen:
             continue
