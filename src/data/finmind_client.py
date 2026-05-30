@@ -11,6 +11,8 @@ from datetime import date, timedelta
 import pandas as pd
 import requests
 
+from . import cache
+
 try:
     from dotenv import load_dotenv
 
@@ -35,6 +37,8 @@ def fetch(
     start_date: str | None = None,
     end_date: str | None = None,
     timeout: int = 30,
+    use_cache: bool = True,
+    max_age_days: int = 1,
 ) -> pd.DataFrame:
     """打 FinMind 一個 dataset，回傳 DataFrame。
 
@@ -42,7 +46,14 @@ def fetch(
         dataset: FinMind dataset 名，例如 'TaiwanStockPrice'。
         data_id: 股票代號，例如 '2330'。
         start_date / end_date: 'YYYY-MM-DD'。
+        use_cache: 是否使用 SQLite 快取（同日重複查直接讀快取）。
     """
+    cache_key = f"{dataset}|{data_id}|{start_date}|{end_date}"
+    if use_cache:
+        cached = cache.get(cache_key, max_age_days=max_age_days)
+        if cached is not None:
+            return pd.DataFrame(cached)
+
     params: dict[str, str] = {"dataset": dataset}
     if data_id:
         params["data_id"] = data_id
@@ -59,7 +70,10 @@ def fetch(
     payload = resp.json()
     if payload.get("status") != 200:
         raise FinMindError(f"FinMind 回傳錯誤: {payload.get('status')} {payload.get('msg')}")
-    return pd.DataFrame(payload.get("data", []))
+    records = payload.get("data", [])
+    if use_cache:
+        cache.put(cache_key, records)
+    return pd.DataFrame(records)
 
 
 # --- 常用資料的便利函式 -------------------------------------------------
@@ -91,3 +105,18 @@ def month_revenue(data_id: str, days: int = 730) -> pd.DataFrame:
 def per_pbr(data_id: str, days: int = 120) -> pd.DataFrame:
     """本益比 / 股價淨值比 / 殖利率。"""
     return fetch("TaiwanStockPER", data_id, _default_start(days))
+
+
+def financial_statements(data_id: str, days: int = 500) -> pd.DataFrame:
+    """綜合損益表（長格式，type 含 EPS / Revenue / GrossProfit / OperatingIncome ...）。"""
+    return fetch("TaiwanStockFinancialStatements", data_id, _default_start(days))
+
+
+def balance_sheet(data_id: str, days: int = 500) -> pd.DataFrame:
+    """資產負債表（長格式，type 含 Equity / Liabilities / TotalAssets ...）。"""
+    return fetch("TaiwanStockBalanceSheet", data_id, _default_start(days))
+
+
+def shareholding(data_id: str, days: int = 60) -> pd.DataFrame:
+    """外資持股比例（集保 / 投信投顧公會）。"""
+    return fetch("TaiwanStockShareholding", data_id, _default_start(days))
