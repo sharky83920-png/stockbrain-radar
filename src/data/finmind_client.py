@@ -120,3 +120,13 @@ def balance_sheet(data_id: str, days: int = 500) -> pd.DataFrame:
 def shareholding(data_id: str, days: int = 60) -> pd.DataFrame:
     """外資持股比例（集保 / 投信投顧公會）。"""
     return fetch("TaiwanStockShareholding", data_id, _default_start(days))
+
+
+def dividend(data_id: str, days: int = 1500) -> pd.DataFrame:
+    """歷年股利（現金/股票股利、除息日）。"""
+    return fetch("TaiwanStockDividend", data_id, _default_start(days))
+
+
+def news(data_id: str, days: int = 14) -> pd.DataFrame:
+    """個股相關新聞（date / source / title / link）。"""
+    return fetch("TaiwanStockNews", data_id, _default_start(days))

@@ -144,7 +144,7 @@ def _fundamentals_section(sid: str) -> dict[str, Any]:
     return out
 
 
-def _valuation_section(sid: str, fundamentals: dict[str, Any]) -> dict[str, Any]:
+def _valuation_section(sid: str, fundamentals: dict[str, Any], close: float | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     per = fm.per_pbr(sid, days=30).sort_values("date")
     if not per.empty:
@@ -156,6 +156,9 @@ def _valuation_section(sid: str, fundamentals: dict[str, Any]) -> dict[str, Any]
         eps_yoy = fundamentals.get("eps_yoy_pct")
         if eps_yoy and eps_yoy > 0:
             out["peg"] = round(float(last["PER"]) / eps_yoy, 2)
+    # 股利（近一年加總 + 年化預估）
+    from ..analysis.valuation import dividend_analysis
+    out["dividend"] = dividend_analysis(sid, close)
     return out
 
 
@@ -164,9 +167,10 @@ def _valuation_section(sid: str, fundamentals: dict[str, Any]) -> dict[str, Any]
 def build_snapshot(stock_id: str) -> dict[str, Any]:
     """產生單檔個股研究快照。"""
     price = _safe(lambda: _price_section(stock_id))
+    close = price.get("close") if isinstance(price, dict) else None
     chips = _safe(lambda: _chips_section(stock_id))
     fundamentals = _safe(lambda: _fundamentals_section(stock_id))
-    valuation = _safe(lambda: _valuation_section(stock_id, fundamentals if isinstance(fundamentals, dict) else {}))
+    valuation = _safe(lambda: _valuation_section(stock_id, fundamentals if isinstance(fundamentals, dict) else {}, close))
     return {
         "stock_id": stock_id,
         "price": price,
