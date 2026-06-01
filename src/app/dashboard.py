@@ -119,10 +119,11 @@ _TP_RE = re.compile(
 _TP_BAD_PREFIX = ("EPS", "eps", "獲利", "賺", "營收", "股本")
 # 出現這些比較語氣 → 標題在講「別檔」打敗本檔，數字多半是別檔的
 _TP_COMPARE = ("贏過", "不只", "勝過", "超車", "打敗", "海放")
-_BROKERS = ["大摩", "小摩", "摩根士丹利", "摩根大通", "摩根", "高盛", "瑞銀", "UBS", "美林", "花旗",
-            "野村", "瑞信", "麥格理", "里昂", "傑富瑞", "Jefferies", "匯豐", "星展", "巴克萊",
-            "德意志", "Factset", "凱基", "元大", "富邦", "群益", "中信", "第一金", "兆豐", "外資",
-            "投信", "法人", "分析師", "杜金龍"]
+# 只認「具名」的券商/機構——不含「外資/投信/法人/分析師」這種泛稱，也不採用媒體名
+_NAMED_FIRMS = ["摩根士丹利", "大摩", "摩根大通", "小摩", "摩根", "高盛", "瑞銀", "UBS", "美林",
+                "花旗", "野村", "瑞信", "麥格理", "里昂", "傑富瑞", "Jefferies", "匯豐", "星展",
+                "巴克萊", "德意志", "Factset", "凱基", "元大", "富邦", "群益", "中信", "第一金",
+                "兆豐", "國泰", "永豐", "統一", "美銀", "杜金龍"]
 
 
 def _extract_target_prices(news_df, ref_price=None):
@@ -151,7 +152,9 @@ def _extract_target_prices(news_df, ref_price=None):
             vals.append(str(int(v)))
         if not vals:
             continue
-        broker = next((b for b in _BROKERS if b in title), None) or str(r.get("source", "—"))
+        broker = next((b for b in _NAMED_FIRMS if b in title), None)
+        if not broker:
+            continue  # 沒有明確具名券商/機構 → 不顯示（符合「要明確名稱」的要求）
         price_str = "、".join(sorted(set(vals), key=lambda x: float(x)))
         key = (broker, price_str)
         if key in seen:
@@ -410,7 +413,7 @@ with tab_val:
                 width="stretch", hide_index=True,
                 column_config={"title": "新聞標題"},
             )
-            st.caption("※ 自動從新聞標題擷取，已用現價 0.4~2.6 倍過濾；仍可能含同篇提及的其他個股，請點原文核對。")
+            st.caption("※ 只列出新聞標題中**有具名券商/機構**者（瑞銀、大摩、高盛、里昂…），泛稱『外資/法人』與媒體名一律不列。仍建議點原文核對。")
         else:
             st.info("近期新聞中未擷取到明確目標價數字。註：免費資料源沒有結構化的各券商目標價（屬付費資料），"
                     "此功能靠新聞擷取，量取決於新聞多寡——填 FinMind token 後新聞變多會更有料。")
