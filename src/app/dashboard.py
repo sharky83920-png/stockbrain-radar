@@ -13,6 +13,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.analysis import guidance as guidance_mod
 from src.analysis import industry as industry_mod
 from src.analysis import news_digest
 from src.analysis.valuation import pe_band
@@ -96,6 +97,24 @@ def _mini(sid: str):
 @st.cache_data(ttl=1800)
 def _news(sid: str):
     return news_sources.get_news(sid, _name(sid), days=21)
+
+
+@st.cache_data(ttl=3600)
+def _guidance(sid: str):
+    import pandas as _pd
+    nm = _name(sid) or sid
+    frames = []
+    for q in (f"{nm} 法說會", f"{nm} {sid}"):
+        try:
+            g = news_sources.google_news(q, limit=30)
+            if not g.empty:
+                frames.append(g)
+        except Exception:
+            pass
+    if not frames:
+        return {}
+    news = _pd.concat(frames, ignore_index=True).drop_duplicates(subset="title")
+    return guidance_mod.summarize(news)
 
 
 @st.cache_data(ttl=1800)
@@ -341,6 +360,23 @@ with tab_fund:
             fig = px.bar(edf, x="q", y="eps", title="近四季每股盈餘 EPS（元）", text="eps")
             fig.update_layout(xaxis_title="財報季", yaxis_title="EPS 元")
             col2.plotly_chart(fig, width="stretch")
+
+        # 法說會 guidance（公司財測，從新聞擷取）
+        st.divider()
+        st.markdown("#### 🎤 法說會 guidance（公司財測）",
+                    help="公司在法說會給的財測（全年營收成長/毛利率/資本支出），是分析師預估 EPS 的最上游原料。此處從新聞擷取，best-effort；填 GEMINI_KEY 後可分辨『公司自述 vs 券商解讀』並更精準。")
+        gv = _guidance(sid)
+        if gv and gv.get("evidence"):
+            ga, gb, gc = st.columns(3)
+            _metric(ga, "全年營收成長", gv.get("營收成長%"), "%")
+            _metric(gb, "毛利率", gv.get("毛利率%"), "%")
+            _metric(gc, "資本支出", gv.get("資本支出(億美元)"), " 億美元")
+            with st.expander(f"佐證新聞（{len(gv['evidence'])} 則）"):
+                for e in gv["evidence"][:8]:
+                    st.markdown(f"- `{e['date']}` {e['title']}")
+            st.caption("※ 從法說會新聞自動擷取，僅供參考，數字請點原文核對。")
+        else:
+            st.info("近期未從新聞抓到明確法說會 guidance（可能尚未開法說，或報導未含數字）。")
     else:
         st.warning(f"基本面資料讀取問題：{fund.get('error') if isinstance(fund, dict) else fund}")
 
