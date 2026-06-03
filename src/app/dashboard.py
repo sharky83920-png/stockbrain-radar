@@ -13,6 +13,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.analysis import eps_model
 from src.analysis import guidance as guidance_mod
 from src.analysis import industry as industry_mod
 from src.analysis import news_digest
@@ -97,6 +98,17 @@ def _mini(sid: str):
 @st.cache_data(ttl=1800)
 def _news(sid: str):
     return news_sources.get_news(sid, _name(sid), days=21)
+
+
+@st.cache_data(ttl=3600)
+def _eps_fund(sid: str):
+    return eps_model.fundamentals_ttm(sid)
+
+
+@st.cache_data(ttl=3600)
+def _pe_band3(sid: str):
+    from src.analysis.valuation import pe_band
+    return pe_band(sid, years=3, percentiles=(20, 50, 80))
 
 
 @st.cache_data(ttl=3600)
@@ -435,6 +447,48 @@ with tab_val:
             st.caption(f"PER 帶倍數（取近三年歷史百分位）：{mults}　｜　目前 PER {band.get('current_per')} 倍")
         else:
             st.info("此檔資料不足以繪製本益比河流圖（可能 EPS 為負或歷史太短）。")
+
+        # 📈 EPS 推估器 / 股價推估（本益比評價法）
+        st.divider()
+        st.markdown("#### 📈 EPS 推估器（拉桿試算股價）",
+                    help="以近四季實際財務為基準，調整『預估營收成長』與『預估毛利率』推估 forward EPS，再乘上歷史本益比區間得到合理股價。毛利率低的公司(如鴻海)槓桿很大。")
+        f = _eps_fund(sid)
+        band = _pe_band3(sid)
+        if f and f.get("shares") and band.get("multiples"):
+            cur_gm = round(f["gross_margin"] * 100, 2)
+            sens = eps_model.eps_sensitivity_to_margin(f)
+            d1, d2 = st.columns(2)
+            d1.caption(f"基準：TTM 營收 {f['rev']/1e8:,.0f} 億、毛利率 {cur_gm}%、稅率 {f['tax_rate']*100:.1f}%、歸母佔比 {f['parent_ratio']*100:.1f}%、股數 {f['shares']/1e8:.1f} 億")
+            d2.caption(f"槓桿：毛利率每 +1 個百分點 ≈ EPS **{sens:+.2f} 元**")
+
+            gv = _guidance(sid)
+            g_growth = gv.get("營收成長%") if gv else None
+            g_gm = gv.get("毛利率%") if gv else None
+            c1, c2 = st.columns(2)
+            rev_g = c1.slider("預估營收成長 (%)", -20.0, 80.0,
+                              float(g_growth) if g_growth else 0.0, 1.0,
+                              help="可參考法說會 guidance")
+            gm = c2.slider("預估毛利率 (%)", max(1.0, cur_gm - 4), cur_gm + 8,
+                           float(g_gm) if g_gm else cur_gm, 0.1)
+            if g_growth or g_gm:
+                st.caption(f"💡 法說會 guidance 預設：營收成長 {g_growth or '—'}%、毛利率 {g_gm or '—'}%")
+
+            eps_fwd = eps_model.project_eps(f, rev_g, gm)
+            cur_price = price.get("close") if isinstance(price, dict) else None
+            mults = band["multiples"]  # [低, 中, 高]
+            labels = ["便宜(PER低)", "合理(PER中)", "昂貴(PER高)"]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("推估 EPS", f"{eps_fwd:.2f}", f"{eps_fwd - f['eps_ttm']:+.2f} vs TTM")
+            rows = []
+            for lab, mlt, col in zip(labels, mults, (m2, m3, m4)):
+                tp = eps_fwd * mlt
+                up = (tp / cur_price - 1) * 100 if cur_price else None
+                col.metric(f"{lab} ×{mlt}", f"{tp:,.0f}",
+                           f"{up:+.1f}%" if up is not None else None, delta_color="inverse")
+                rows.append({"情境": lab, "PER": mlt, "推估股價": round(tp), "對現價": f"{up:+.1f}%" if up is not None else "—"})
+            st.caption(f"推估 EPS {eps_fwd:.2f} × 歷史 PER {mults}　｜　現價 {cur_price}（漲跌幅%為台股紅漲綠跌）")
+        else:
+            st.info("此檔資料不足以推估 EPS（可能缺財報、股本或 EPS 為負）。")
 
         # 分析師目標價（從新聞擷取，best-effort）
         st.divider()
