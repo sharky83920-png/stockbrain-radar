@@ -106,9 +106,41 @@ def _eps_fund(sid: str):
 
 
 @st.cache_data(ttl=3600)
-def _pe_band3(sid: str):
+def _pe_band3(sid: str, years: int = 3):
     from src.analysis.valuation import pe_band
-    return pe_band(sid, years=3, percentiles=(20, 50, 80))
+    return pe_band(sid, years=years, percentiles=(20, 50, 80))
+
+
+_GM_PCT = re.compile(r"毛利率[^0-9]{0,8}(\d{1,2}(?:\.\d)?)\s*%")
+
+
+@st.cache_data(ttl=3600)
+def _gm_news(sid: str):
+    """擷取新聞中提到的毛利率（給 EPS 推估器設定拉桿參考）。"""
+    import pandas as _pd
+    nm = _name(sid) or sid
+    frames = []
+    for q in (f"{nm} 毛利率", f"{nm} 毛利率 外資", f"{nm} 法說 毛利率"):
+        try:
+            g = news_sources.google_news(q, limit=20)
+            if not g.empty:
+                frames.append(g)
+        except Exception:
+            pass
+    if not frames:
+        return []
+    nz = _pd.concat(frames, ignore_index=True).drop_duplicates(subset="title")
+    rows = []
+    for _, r in nz.iterrows():
+        t = str(r["title"])
+        if "毛利率" not in t:
+            continue
+        m = _GM_PCT.search(t)
+        rows.append({"date": str(r["date"])[:10], "毛利率%": m.group(1) if m else "—",
+                     "title": t, "link": r.get("link", "")})
+    # 有數字的優先、再依日期新→舊
+    rows.sort(key=lambda x: (x["毛利率%"] == "—", ), )
+    return rows[:8]
 
 
 @st.cache_data(ttl=3600)
@@ -453,40 +485,66 @@ with tab_val:
         st.markdown("#### 📈 EPS 推估器（拉桿試算股價）",
                     help="以近四季實際財務為基準，調整『預估營收成長』與『預估毛利率』推估 forward EPS，再乘上歷史本益比區間得到合理股價。毛利率低的公司(如鴻海)槓桿很大。")
         f = _eps_fund(sid)
-        band = _pe_band3(sid)
-        if f and f.get("shares") and band.get("multiples"):
+        if f and f.get("shares"):
             cur_gm = round(f["gross_margin"] * 100, 2)
             sens = eps_model.eps_sensitivity_to_margin(f)
-            d1, d2 = st.columns(2)
-            d1.caption(f"基準：TTM 營收 {f['rev']/1e8:,.0f} 億、毛利率 {cur_gm}%、稅率 {f['tax_rate']*100:.1f}%、歸母佔比 {f['parent_ratio']*100:.1f}%、股數 {f['shares']/1e8:.1f} 億")
-            d2.caption(f"槓桿：毛利率每 +1 個百分點 ≈ EPS **{sens:+.2f} 元**")
+            st.caption(f"基準（近四季）：營收 {f['rev']/1e8:,.0f} 億、毛利率 {cur_gm}%、稅率 {f['tax_rate']*100:.1f}%、歸母佔比 {f['parent_ratio']*100:.1f}%、股數 {f['shares']/1e8:.1f} 億　｜　**槓桿：毛利率每 +1pp ≈ EPS {sens:+.2f} 元**")
 
             gv = _guidance(sid)
             g_growth = gv.get("營收成長%") if gv else None
             g_gm = gv.get("毛利率%") if gv else None
             c1, c2 = st.columns(2)
             rev_g = c1.slider("預估營收成長 (%)", -20.0, 80.0,
-                              float(g_growth) if g_growth else 0.0, 1.0,
-                              help="可參考法說會 guidance")
+                              float(g_growth) if g_growth else 0.0, 1.0)
             gm = c2.slider("預估毛利率 (%)", max(1.0, cur_gm - 4), cur_gm + 8,
                            float(g_gm) if g_gm else cur_gm, 0.1)
-            if g_growth or g_gm:
-                st.caption(f"💡 法說會 guidance 預設：營收成長 {g_growth or '—'}%、毛利率 {g_gm or '—'}%")
+
+            # 毛利率新聞參考（給拉桿一個依據）
+            gmn = _gm_news(sid)
+            with st.expander("📰 新聞提到的毛利率（設定拉桿前可參考）"):
+                got_num = [r for r in gmn if r["毛利率%"] != "—"]
+                if got_num:
+                    for r in got_num[:6]:
+                        st.markdown(f"- `{r['date']}` **{r['毛利率%']}%** ｜ {r['title'][:54]}")
+                    st.caption("⚠️ 數字可能是同篇提到的其他個股，請看標題確認。")
+                else:
+                    st.info(f"新聞標題沒抓到 {(_name(sid) or sid)} 的明確毛利率數字——這類預估多在法說/券商報告內文，免費標題撈不到（需 Gemini 讀內文或看凱基研報）。")
+                if gmn:
+                    st.caption("毛利率相關新聞：" + "；".join(r["title"][:22] for r in gmn[:4]))
+
+            # PER 倍數設定（答 Q1：可調年數，或自訂）
+            st.markdown("**本益比(PER)倍數設定**")
+            p1, p2 = st.columns([1, 2])
+            yrs = p1.selectbox("歷史取樣年數", [1, 2, 3, 5], index=2,
+                               help="PER 低/中/高 = 該期間每日 PER 的 20/50/80 百分位。再評等中的股票(如鴻海)可選短年數或改自訂。")
+            band = _pe_band3(sid, yrs)
+            hist_mults = band.get("multiples") or []
+            manual = p2.checkbox("自訂 PER（覆蓋歷史）", help="若你認為產業/題材讓它該享有不同評價，可手動輸入")
+            if manual or len(hist_mults) < 3:
+                base_lo = hist_mults[0] if len(hist_mults) >= 3 else 10.0
+                base_mid = hist_mults[1] if len(hist_mults) >= 3 else 15.0
+                base_hi = hist_mults[2] if len(hist_mults) >= 3 else 20.0
+                q1, q2, q3 = st.columns(3)
+                lo = q1.number_input("低 PER", 1.0, 100.0, float(round(base_lo, 1)), 0.5)
+                mid = q2.number_input("中 PER", 1.0, 100.0, float(round(base_mid, 1)), 0.5)
+                hi = q3.number_input("高 PER", 1.0, 100.0, float(round(base_hi, 1)), 0.5)
+                mults = [lo, mid, hi]
+                src = "自訂"
+            else:
+                mults = hist_mults
+                src = f"近{yrs}年歷史百分位(20/50/80)"
 
             eps_fwd = eps_model.project_eps(f, rev_g, gm)
             cur_price = price.get("close") if isinstance(price, dict) else None
-            mults = band["multiples"]  # [低, 中, 高]
             labels = ["便宜(PER低)", "合理(PER中)", "昂貴(PER高)"]
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("推估 EPS", f"{eps_fwd:.2f}", f"{eps_fwd - f['eps_ttm']:+.2f} vs TTM")
-            rows = []
             for lab, mlt, col in zip(labels, mults, (m2, m3, m4)):
                 tp = eps_fwd * mlt
                 up = (tp / cur_price - 1) * 100 if cur_price else None
                 col.metric(f"{lab} ×{mlt}", f"{tp:,.0f}",
                            f"{up:+.1f}%" if up is not None else None, delta_color="inverse")
-                rows.append({"情境": lab, "PER": mlt, "推估股價": round(tp), "對現價": f"{up:+.1f}%" if up is not None else "—"})
-            st.caption(f"推估 EPS {eps_fwd:.2f} × 歷史 PER {mults}　｜　現價 {cur_price}（漲跌幅%為台股紅漲綠跌）")
+            st.caption(f"推估 EPS {eps_fwd:.2f} × PER {mults}（{src}）　｜　現價 {cur_price}　｜　目前 PER {band.get('current_per')}（漲跌幅%為台股紅漲綠跌）")
         else:
             st.info("此檔資料不足以推估 EPS（可能缺財報、股本或 EPS 為負）。")
 
