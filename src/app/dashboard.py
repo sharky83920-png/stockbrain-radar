@@ -13,6 +13,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.analysis import debate_engine
 from src.analysis import eps_model
 from src.analysis import guidance as guidance_mod
 from src.analysis import industry as industry_mod
@@ -313,9 +314,40 @@ if _wl:
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
 
-tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry = st.tabs(
-    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈"]
+tab_debate, tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry = st.tabs(
+    ["🧠 請專家們討論", "🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈"]
 )
+
+# --- 🧠 請專家們討論 --------------------------------------------------------
+with tab_debate:
+    st.markdown("#### 🧠 請專家們討論")
+    st.caption("輸入股票代號或中文名稱，專家會讀『即時數據＋你的知識庫』輪流討論、最後給結論。")
+    dc1, dc2 = st.columns([3, 1])
+    dq = dc1.text_input("股票代號或中文名稱（如 2330 或 台積電）", value=sid, key="debate_q").strip()
+    demo_force = st.checkbox(
+        "示範模式（假腦，不花錢）", value=not gem.is_configured(),
+        help="勾選＝用罐頭發言示範流程、不呼叫 API、不花錢。取消＝用 Gemini 真腦（需在 .env 設好 GEMINI_KEY）。",
+    )
+    run_debate_btn = dc2.button("🚀 請專家們討論", width="stretch")
+    if run_debate_btn:
+        rsid, rname = debate_engine.resolve_stock(dq)
+        if not rsid:
+            st.error(f"查不到「{dq}」，請確認代號或中文名稱。")
+        else:
+            brain = "demo" if demo_force else "gemini"
+            st.info(f"討論標的：**{rname}({rsid})**　｜　腦：{'🧪 假腦（示範）' if brain == 'demo' else '🤖 Gemini'}")
+            try:
+                dsnap = _snapshot(rsid)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"撈不到 {rsid} 的數據：{type(e).__name__}: {e}")
+                dsnap = None
+            if dsnap:
+                with st.spinner("專家討論中…"):
+                    for turn in debate_engine.run_debate(rsid, rname, dsnap, brain=brain):
+                        with st.chat_message("assistant"):
+                            st.markdown(f"{turn['emoji']} **{turn['name']}**\n\n{turn['text']}")
+                st.success("討論結束。下一步可加：自動存進 vault 筆記 ＋ 工作排程器定時跑 ＋ 推播到手機。")
+    st.caption("⚠️ 公開資訊＋AI 推理，非投資建議。知識庫路徑可用環境變數 STOCKBRAIN_KB_DIR 覆寫。")
 
 
 def _ai_summary_block(news_df, key_suffix):
