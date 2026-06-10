@@ -21,6 +21,7 @@ from src.analysis import news_digest
 from src.analysis.valuation import pe_band
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
+from src.data import analysts as analysts_mod
 from src.data import news_sources
 from src.data import watchlist
 from src.data.snapshot import build_snapshot
@@ -258,6 +259,17 @@ def _add_current(s, nm):
     watchlist.add(s, nm)
 
 
+def _remove_analyst(n):
+    analysts_mod.remove(n)
+
+
+def _add_analyst_cb():
+    n = st.session_state.get("new_analyst", "").strip()
+    if n:
+        analysts_mod.add(n)
+        st.session_state["new_analyst"] = ""
+
+
 # 我的清單（存 Obsidian vault，跨機同步）
 st.sidebar.divider()
 st.sidebar.subheader("⭐ 我的清單")
@@ -277,6 +289,17 @@ if sid:
     else:
         st.sidebar.button(f"⭐ 加入 {sid}", key="add_cur",
                           on_click=_add_current, args=(sid, _name(sid)))
+
+# 🎤 我的分析師（名人觀點，存 vault 跨機同步）
+st.sidebar.divider()
+st.sidebar.subheader("🎤 我的分析師")
+st.sidebar.caption("討論時可勾「加入名人觀點」，請他們的最新公開解盤進場。")
+for _a in analysts_mod.load():
+    ca, cb = st.sidebar.columns([4, 1])
+    ca.caption(_a["name"])
+    cb.button("✕", key=f"rma_{_a['name']}", on_click=_remove_analyst, args=(_a["name"],))
+st.sidebar.text_input("新增分析師（姓名/暱稱）", key="new_analyst")
+st.sidebar.button("＋ 新增分析師", key="add_analyst", on_click=_add_analyst_cb)
 
 if not sid:
     st.info("← 在左側輸入股票代號")
@@ -328,6 +351,13 @@ with tab_debate:
         "示範模式（假腦，不花錢）", value=not gem.is_configured(),
         help="勾選＝用罐頭發言示範流程、不呼叫 API、不花錢。取消＝用 Gemini 真腦（需在 .env 設好 GEMINI_KEY）。",
     )
+    _al_names = analysts_mod.names()
+    include_pundits = st.checkbox(
+        f"🎤 加入名人觀點（上網搜 {len(_al_names)} 位分析師對本檔的最新公開解盤）",
+        value=False,
+        help="多一位『名人觀點專家』，用 Google News 搜你左側『我的分析師』清單對這檔的近期公開報導帶進討論。"
+             "⚠️ 付費會員/訂閱內容搜不到（要自己貼進知識庫）。",
+    )
     run_debate_btn = dc2.button("🚀 請專家們討論", width="stretch")
     if run_debate_btn:
         rsid, rname = debate_engine.resolve_stock(dq)
@@ -335,7 +365,9 @@ with tab_debate:
             st.error(f"查不到「{dq}」，請確認代號或中文名稱。")
         else:
             brain = "demo" if demo_force else "gemini"
-            st.info(f"討論標的：**{rname}({rsid})**　｜　腦：{'🧪 假腦（示範）' if brain == 'demo' else '🤖 Gemini'}")
+            analysts_arg = _al_names if include_pundits else None
+            _pundit_tag = f"　｜　🎤 名人觀點：{'、'.join(_al_names)}" if analysts_arg else ""
+            st.info(f"討論標的：**{rname}({rsid})**　｜　腦：{'🧪 假腦（示範）' if brain == 'demo' else '🤖 Gemini'}{_pundit_tag}")
             try:
                 dsnap = _snapshot(rsid)
             except Exception as e:  # noqa: BLE001
@@ -343,7 +375,7 @@ with tab_debate:
                 dsnap = None
             if dsnap:
                 with st.spinner("專家討論中…"):
-                    for turn in debate_engine.run_debate(rsid, rname, dsnap, brain=brain):
+                    for turn in debate_engine.run_debate(rsid, rname, dsnap, brain=brain, analysts=analysts_arg):
                         with st.chat_message("assistant"):
                             st.markdown(f"{turn['emoji']} **{turn['name']}**\n\n{turn['text']}")
                 st.success("討論結束。下一步可加：自動存進 vault 筆記 ＋ 工作排程器定時跑 ＋ 推播到手機。")

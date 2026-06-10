@@ -14,6 +14,7 @@ from pathlib import Path
 
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
+from src.data import news_sources
 
 # --- 知識庫（RAG）路徑 ------------------------------------------------------
 # 預設指向 secondbrain vault 的知識庫；換電腦磁碟代號不同 → 用環境變數 STOCKBRAIN_KB_DIR 覆寫。
@@ -169,15 +170,77 @@ def _demo_turn(expert: dict, name: str, sid: str, snap: dict) -> str:
     return "（…）"
 
 
+# --- 🎤 名人觀點專家：上網搜你追蹤的分析師對本檔的最新公開消息 --------------
+PUNDIT = {"key": "pundit", "name": "名人觀點專家", "emoji": "🎤"}
+
+
+def pundit_findings(name: str, analysts: list[str], per: int = 2) -> list[dict]:
+    """對每位分析師搜「分析師名 + 股名」的公開新聞，回 [{analyst, items:[{date,title,link}]}]。"""
+    res = []
+    for a in analysts:
+        items = []
+        try:
+            df = news_sources.google_news(f"{a} {name}", limit=12)
+            if df is not None and not df.empty:
+                for _, r in df.head(per).iterrows():
+                    items.append({"date": str(r.get("date", ""))[:10],
+                                  "title": str(r.get("title", "")),
+                                  "link": r.get("link", "")})
+        except Exception:
+            pass
+        res.append({"analyst": a, "items": items})
+    return res
+
+
+def _pundit_demo(findings: list[dict]) -> str:
+    lines = ["我去翻了幾位你追蹤的分析師最近的公開消息："]
+    for f in findings:
+        if f["items"]:
+            top = f["items"][0]
+            lines.append(f"- {f['analyst']}：`{top['date']}` {top['title'][:50]}")
+        else:
+            lines.append(f"- {f['analyst']}：近期無公開評論")
+    lines.append("（資料來自公開新聞，付費會員內容不含；示範模式不深入解讀，真腦會幫你整理觀點）")
+    return "\n".join(lines)
+
+
+def _pundit_gemini(findings: list[dict], name: str) -> str:
+    blocks = []
+    for f in findings:
+        if f["items"]:
+            its = "\n".join(f"   - {i['date']} {i['title']}" for i in f["items"])
+            blocks.append(f"- {f['analyst']}:\n{its}")
+        else:
+            blocks.append(f"- {f['analyst']}: (查無公開資料)")
+    data = "\n".join(blocks)
+    prompt = (
+        f"你是「名人觀點專家」。以下是從公開新聞搜到的、幾位分析師近期與 {name} 相關的報導標題。"
+        f"請用繁體中文，逐位簡述『這位分析師最近對 {name} 或相關情勢的公開看法』，可引用標題日期。"
+        f"查無資料者明說『近期無公開評論』。嚴禁杜撰，也不要把別檔內容硬套到本檔。整體 3-6 句。\n\n{data}"
+    )
+    return gem.generate(prompt)
+
+
 # --- 主流程：generator，一位專家一則 ----------------------------------------
-def run_debate(sid: str, name: str, snap: dict, brain: str = "demo"):
-    """逐則 yield {'name','emoji','text'}。brain='demo'|'gemini'。"""
+def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
+               analysts: list[str] | None = None):
+    """逐則 yield {'name','emoji','text'}。brain='demo'|'gemini'。
+    analysts 非空 → 插入一位 🎤 名人觀點專家（上網搜這些人對本檔的最新公開解盤）。"""
     brief = data_brief(name, sid, snap)
     kb = load_knowledge(sid)
+    experts = list(EXPERTS)
+    findings = None
+    if analysts:
+        findings = pundit_findings(name, analysts)
+        idx = next((i for i, e in enumerate(experts) if e["key"] == "bear"), len(experts))
+        experts.insert(idx, PUNDIT)  # 排在「風險空方」之前發言
+
     transcript: list[dict] = []
-    for expert in EXPERTS:
+    for expert in experts:
         try:
-            if brain == "gemini":
+            if expert["key"] == "pundit":
+                text = _pundit_gemini(findings, name) if brain == "gemini" else _pundit_demo(findings)
+            elif brain == "gemini":
                 text = _gemini_turn(expert, brief, kb, transcript)
             else:
                 text = _demo_turn(expert, name, sid, snap)
