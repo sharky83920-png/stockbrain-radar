@@ -21,3 +21,4 @@ Thumbs.db
 
 # 執行 log
 data/*.log
+data/tg_offset.txt
