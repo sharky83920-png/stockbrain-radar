@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 from pathlib import Path
 
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
+from src.data import macro_data
 from src.data import news_sources
 
 # --- 知識庫（RAG）路徑 ------------------------------------------------------
@@ -115,11 +117,24 @@ EXPERTS = [
     {"key": "bear", "name": "風險空方", "emoji": "⚠️", "kind": "speak",
      "role": "你是風險與空方代表。任務是挑前面論點的毛病、指出最大風險（估值過高、景氣循環、單一客戶、政策、籌碼鬆動等）。犀利但只講事實與數據。2-4 句，繁體中文。"},
     {"key": "host_close", "name": "主持人", "emoji": "🧑‍⚖️", "kind": "close",
-     "role": ("你是主持人，做最終總結。綜合前面討論，依使用者 SOP 的 100 分制（基本面40／籌碼25／技術20／題材15；"
+     "role": ("你是主持人，做最終總結。綜合前面討論（含消息面與交鋒回合），依使用者 SOP 的 100 分制（基本面40／籌碼25／技術20／題材15；"
               "技術與題材若資料不足，明講『資料不足、暫不評分』不要硬掰）給一個粗略總分與分級"
-              "（80+ 強買／60-79 可買／40-59 觀察／<40 跳過）。再點出最大風險一句。"
+              "（80+ 強買／60-79 可買／40-59 觀察／<40 跳過）。**四項分數加總要等於總分，不要再額外加扣分**。"
+              "分數只評個股體質；另外**獨立給一句『進場時機』判斷**——根據國際情勢專家講的總體/資金面，"
+              "說現在大環境對買進是順風還是逆風（例如美股大型 IPO 吸金、外資撤離時，體質好也先等）。"
+              "再點出最大風險一句、以及方才交鋒中誰的論點較站得住腳。"
               "最後務必加一句：『以上為公開資訊＋AI 推理，不是明牌；最終買賣由你自己按。』繁體中文，條列清楚。")},
 ]
+
+# --- 🔥 交鋒回合：第一輪講完後，基本面 ↔ 風險空方 直接對嗆兩輪 -----------------
+REBUT_FUND = {"key": "fund_rebut", "name": "基本面專家", "emoji": "📊", "kind": "speak",
+    "role": ("你是基本面專家，現在進入【交鋒回合】。風險空方剛剛挑了你的毛病。"
+             "請直接點名回應他：他哪一點你承認、哪一點你用具體財務/估值數字反駁回去。"
+             "據理力爭、可以嗆回去，但只憑數據。2-3 句，繁體中文。")}
+REBUT_BEAR = {"key": "bear_rebut", "name": "風險空方", "emoji": "⚠️", "kind": "speak",
+    "role": ("你是風險空方，這是【交鋒回合】最後反擊。基本面專家剛回應了你，"
+             "請抓住他論點裡最站不住腳的一點再追打一次，並重申這檔現在最該防的風險。"
+             "犀利、只講數據與事實。2-3 句，繁體中文。")}
 
 
 # --- 真腦：Gemini -----------------------------------------------------------
@@ -127,13 +142,22 @@ def _gemini_turn(expert: dict, brief: str, kb: dict, transcript: list[dict]) -> 
     convo = "\n".join(f"{t['name']}：{t['text']}" for t in transcript) or "（尚無發言）"
     ctx = kb.get("context", "")[:2500]
     stock_kb = kb.get("stock", "")[:2000]
+    if transcript:  # 已有人發言 → 要求點名交鋒，營造辯論感
+        speak = (
+            f"請以「{expert['name']}」身分發言。"
+            f"**第一句一定要點名回應前面至少一位專家**：同意就說「我認同○○專家的…，再補一點…」，"
+            f"不同意就直接說「我不同意○○專家，因為數據顯示…」。可以據理力爭、互相打臉，"
+            f"但只憑數據與事實，不要重複別人講過的內容。像真的在會議室裡辯論。"
+        )
+    else:  # 開場第一位
+        speak = f"請以「{expert['name']}」身分發言："
     prompt = (
         f"{expert['role']}\n\n"
         f"=== 使用者的投資紀律與脈絡（請依此立場，不要用通用常識）===\n{ctx or '（無）'}\n\n"
         f"=== 這檔的補充資料（投顧報告/使用者筆記）===\n{stock_kb or '（無）'}\n\n"
         f"=== 即時數據 ===\n{brief}\n\n"
         f"=== 目前討論記錄 ===\n{convo}\n\n"
-        f"請以「{expert['name']}」身分發言（不要重複別人講過的，可以反駁）："
+        f"{speak}"
     )
     return gem.generate(prompt)
 
@@ -159,6 +183,12 @@ def _demo_turn(expert: dict, name: str, sid: str, snap: dict) -> str:
             "法人偏買方，動能還在。" if (isinstance(fn, (int, float)) and fn and fn > 0) else "法人沒明顯站買方，追價要小心。")
     if k == "bear":
         return f"我潑冷水：PER {per} 這個估值已經反映不少樂觀預期，一旦營收成長不如預期或國際利空，殺估值的空間不小。先確認你的 −10% 機械停損有設。"
+    if k == "fund_rebut":
+        return (f"我回應風險空方：估值貴我承認，但 PER {per} 是拿『成長』換的——EPS {eps}、ROE {roe}% 撐得住；"
+                "只要三率還在升，殺估值頂多是短線。核心部位我不動。")
+    if k == "bear_rebut":
+        return (f"我再追一句：你講的成長都是『預期』，外資近 20 日提款 {fn} 張是『事實』。"
+                "事實打臉預期時先保命——−10% 機械停損務必守，別把波段風險凹成長線套牢。")
     if k == "host_close":
         return ("【結論（示範）】\n"
                 f"- 基本面：EPS {eps}、ROE {roe}%、三率三升{'✅' if tr else '❌' if tr is not None else '—'}\n"
@@ -221,24 +251,169 @@ def _pundit_gemini(findings: list[dict], name: str) -> str:
     return gem.generate(prompt)
 
 
+# --- 📰 消息面專家：每次討論即時抓最新新聞 + 投顧/目標價動向 -----------------
+NEWS = {"key": "news", "name": "消息面專家", "emoji": "📰"}
+
+
+def news_findings(name: str, sid: str, recent_n: int = 6, tp_n: int = 4) -> dict:
+    """即時抓該股最新新聞 + 投顧/目標價相關報導。回 {'recent':[...], 'analyst':[...]}。"""
+    recent, analyst = [], []
+    try:
+        df = news_sources.get_news(sid, name, days=21)
+        if df is not None and not df.empty:
+            for _, r in df.head(recent_n).iterrows():
+                recent.append({"date": str(r.get("date", ""))[:10],
+                               "title": str(r.get("title", "")),
+                               "source": str(r.get("source", ""))})
+    except Exception:
+        pass
+    try:
+        tp = news_sources.target_price_news(sid, name)
+        if tp is not None and not tp.empty:
+            for _, r in tp.head(tp_n).iterrows():
+                analyst.append({"date": str(r.get("date", ""))[:10],
+                                "title": str(r.get("title", ""))})
+    except Exception:
+        pass
+    return {"recent": recent, "analyst": analyst}
+
+
+def _news_demo(f: dict) -> str:
+    lines = ["我掃了近三週的新聞與投顧動向："]
+    if f["recent"]:
+        lines.append("📰 最新消息：")
+        for it in f["recent"][:4]:
+            lines.append(f"- `{it['date']}` {it['title'][:50]}（{it['source']}）")
+    else:
+        lines.append("- 近期查無明顯新聞。")
+    if f["analyst"]:
+        lines.append("📑 投顧/目標價動向：")
+        for it in f["analyst"][:3]:
+            lines.append(f"- `{it['date']}` {it['title'][:50]}")
+    lines.append("（示範模式只列標題，真腦會幫你濃縮成消息面利多/利空並判斷影響）")
+    return "\n".join(lines)
+
+
+def _news_gemini(f: dict, name: str) -> str:
+    today = date.today().isoformat()
+    recent = "\n".join(f"- {i['date']} {i['title']}（{i['source']}）" for i in f["recent"]) or "（近期無明顯新聞）"
+    analyst = "\n".join(f"- {i['date']} {i['title']}" for i in f["analyst"]) or "（近期無明確目標價/評等報導）"
+    prompt = (
+        f"你是專家討論的「消息面專家」，負責開場後第一個提供情報。**今天是 {today}**，"
+        f"以最新日期的報導為準；標題若說『待公布／即將』但日期已過，視為已發生、別照抄過期說法。"
+        f"以下是 {name} 近三週的新聞標題與投顧/目標價相關報導（只有標題，沒有內文）。"
+        f"請用繁體中文整理成消息面重點：①最新利多、利空各抓 1-2 點 ②投顧目標價或評等動向 "
+        f"③有沒有可能改變基本面或籌碼判斷的大事，提醒後面的專家注意。"
+        f"嚴禁杜撰，只能根據標題；標題沒提到的不要腦補。整體 3-5 句、條列清楚。\n\n"
+        f"=== 最新新聞 ===\n{recent}\n\n=== 投顧/目標價 ===\n{analyst}"
+    )
+    return gem.generate(prompt)
+
+
+# --- 🌍 國際情勢專家：由上而下，抓總經/國際資金面（資金排擠、利率、匯率、地緣）---
+MACRO = {"key": "macro", "name": "國際情勢專家", "emoji": "🌍"}
+
+# 固定掃這些總體面向；個股基本面再好，也擋不住大盤級的資金抽離。
+_MACRO_QUERIES = [
+    "台股 外資 資金 排擠",
+    "美股 大型 IPO 吸金",
+    "Fed 利率 台股 資金",
+    "台幣 匯率 外資 流出",
+    "台股 大盤 國際 利空",
+]
+
+
+def macro_findings(name: str, per_query: int = 3, recent_days: int = 5) -> list[dict]:
+    """抓總經/國際資金面新聞（與個股無關的大盤級事件）。回 [{date,title,source}]，去重依日期排序。
+    recent_days：只抓近 N 天（用 Google News 的 when:Nd 過濾，避免撈到幾個月前的舊聞）。"""
+    seen, items = set(), []
+    for q in _MACRO_QUERIES:
+        try:
+            df = news_sources.google_news(f"{q} when:{recent_days}d", limit=per_query * 2)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        for _, r in df.head(per_query).iterrows():
+            title = str(r.get("title", "")).strip()
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            items.append({"date": str(r.get("date", ""))[:10], "title": title,
+                          "source": str(r.get("source", ""))})
+    items.sort(key=lambda x: x["date"], reverse=True)
+    return items[:8]
+
+
+def _macro_demo(items: list[dict], hard: str = "") -> str:
+    lines = ["我從上而下看總體與國際資金面（個股基本面好，也擋不住大盤抽資金）："]
+    if hard:
+        lines.append(hard)
+    if items:
+        lines.append("【近期總經/國際新聞】")
+        for it in items[:5]:
+            lines.append(f"- `{it['date']}` {it['title'][:50]}（{it['source']}）")
+        lines.append("（示範模式只列數據與標題；真腦會判斷有沒有『資金排擠／利率／匯率／地緣』在抽走台股動能）")
+    elif not hard:
+        lines.append("- 近期未抓到明顯的國際資金排擠或總經利空訊號。")
+    return "\n".join(lines)
+
+
+def _macro_gemini(items: list[dict], name: str, hard: str = "") -> str:
+    today = date.today().isoformat()
+    data = "\n".join(f"- {i['date']} {i['title']}（{i['source']}）" for i in items) or "（近期無明顯總經/國際資金面新聞）"
+    hard_block = (
+        f"=== 即時硬數據（權威數值，判斷市場狀態時以此為準，優先於新聞標題）===\n{hard}\n\n"
+        if hard else ""
+    )
+    prompt = (
+        f"你是專家討論的「國際情勢專家」，負責【由上而下】的視角，補其他專家只看個股的盲點。"
+        f"**今天是 {today}。** 下面同時給你『即時硬數據』與『新聞標題』。\n"
+        f"⚠️ 鐵則：**硬數據是當前真實數值，最可信**；新聞只有標題、可能落後——"
+        f"若標題說『待公布／即將／預期』但日期早於今天，那件事多半已發生，別照抄過期說法。\n"
+        f"請用繁體中文判斷：①用硬數據說現在市場是 risk-on 還 risk-off（VIX、費半、台幣、美債殖利率怎麼走）"
+        f"②台股大盤結構：外資台指期是淨多還淨空（押大盤漲或跌）、大盤融資水位高不高/增減（散戶槓桿與斷頭風險）、"
+        f"是否接近台指期結算日（結算週易有壓盤） ③有沒有『大型美股 IPO 吸金、Fed 利率、外資資金排擠、地緣政治』"
+        f"這類**會抽走台股動能**的事件 ④就算 {name} 基本面沒變，這些總體與大盤力量會不會壓它的股價、讓外資撤出 "
+        f"⑤給後面的專家一句『現在大環境順風還是逆風』。引用具體數字。4-7 句、條列。\n\n"
+        f"{hard_block}"
+        f"=== 總經/國際資金面新聞（已過濾近 {len(items)} 則）===\n{data}"
+    )
+    return gem.generate(prompt)
+
+
 # --- 主流程：generator，一位專家一則 ----------------------------------------
 def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
                analysts: list[str] | None = None):
     """逐則 yield {'name','emoji','text'}。brain='demo'|'gemini'。
-    analysts 非空 → 插入一位 🎤 名人觀點專家（上網搜這些人對本檔的最新公開解盤）。"""
+    流程：主持開場 → 📰消息面 → 基本面 → 籌碼 →〔🎤名人〕→ 風險空方 → 🔥交鋒(基本面↔空方) → 主持總結。
+    analysts 非空 → 多插一位 🎤 名人觀點專家（上網搜這些人對本檔的最新公開解盤）。"""
     brief = data_brief(name, sid, snap)
     kb = load_knowledge(sid)
-    experts = list(EXPERTS)
+    by_key = {e["key"]: e for e in EXPERTS}
+
+    # 建立發言順序：開場 → 消息面 → 國際情勢 → 基本面 → 籌碼 →〔名人〕→ 空方 → 交鋒 → 收尾
+    order = [by_key["host_open"], NEWS, MACRO, by_key["fund"], by_key["chip"]]
     findings = None
     if analysts:
         findings = pundit_findings(name, analysts)
-        idx = next((i for i, e in enumerate(experts) if e["key"] == "bear"), len(experts))
-        experts.insert(idx, PUNDIT)  # 排在「風險空方」之前發言
+        order.append(PUNDIT)  # 名人觀點排在風險空方之前
+    order += [by_key["bear"], REBUT_FUND, REBUT_BEAR, by_key["host_close"]]
+
+    # 消息面 + 國際情勢專家每次都即時抓最新情報
+    news_f = news_findings(name, sid)
+    macro_f = macro_findings(name)
+    macro_hard = macro_data.summary_lines()  # yfinance 即時行情 + FRED 美國總經
 
     transcript: list[dict] = []
-    for expert in experts:
+    for expert in order:
+        k = expert["key"]
         try:
-            if expert["key"] == "pundit":
+            if k == "news":
+                text = _news_gemini(news_f, name) if brain == "gemini" else _news_demo(news_f)
+            elif k == "macro":
+                text = _macro_gemini(macro_f, name, macro_hard) if brain == "gemini" else _macro_demo(macro_f, macro_hard)
+            elif k == "pundit":
                 text = _pundit_gemini(findings, name) if brain == "gemini" else _pundit_demo(findings)
             elif brain == "gemini":
                 text = _gemini_turn(expert, brief, kb, transcript)

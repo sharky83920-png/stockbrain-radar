@@ -344,7 +344,7 @@ tab_debate, tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry = st
 # --- 🧠 請專家們討論 --------------------------------------------------------
 with tab_debate:
     st.markdown("#### 🧠 請專家們討論")
-    st.caption("輸入股票代號或中文名稱，專家會讀『即時數據＋你的知識庫』輪流討論、最後給結論。")
+    st.caption("輸入代號/中文名，專家即時抓『最新數據＋個股新聞＋投顧動向＋🌍國際資金面＋你的知識庫』，互相點名辯論、交鋒兩輪後給結論與進場時機。")
     dc1, dc2 = st.columns([3, 1])
     dq = dc1.text_input("股票代號或中文名稱（如 2330 或 台積電）", value=sid, key="debate_q").strip()
     demo_force = st.checkbox(
