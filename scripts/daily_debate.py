@@ -22,6 +22,8 @@ from src.analysis import debate_engine as de
 from src.analysis import screener
 from src.data import gemini_client as gem
 from src.data import inbox
+from src.data import macro_data
+from src.data import notify
 from src.data import watchlist
 from src.data.snapshot import build_snapshot
 
@@ -60,13 +62,23 @@ def write_screen_report(kb_dir, today: str) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"已寫入選股雷達：{out}（{len(picks)} 檔）")
+    return picks
+
+
+def _digest_line(r: dict) -> str:
+    """從結論抓「📌」那行做精簡推播；抓不到就取前 48 字。"""
+    for ln in (r.get("conclusion") or "").splitlines():
+        s = ln.strip().replace("*", "")
+        if s.startswith("📌"):
+            return f"• {r['name']}{r['sid']}｜{s[1:].strip()}"
+    short = (r.get("conclusion") or "").strip().replace("*", "").replace("\n", " ")[:48]
+    return f"• {r['name']}{r['sid']}｜{short}"
 
 
 def main() -> None:
     # 先讀手機收件匣，把新加的股票併進清單
     try:
-        inbox_res = inbox.process_inbox()
-        for r in inbox_res:
+        for r in inbox.process_inbox():
             print(f"  收件匣：「{r['input']}」→ {r['status']}")
     except Exception as e:  # noqa: BLE001
         print(f"收件匣處理失敗：{type(e).__name__}: {e}")
@@ -79,25 +91,43 @@ def main() -> None:
     today = dt.date.today().isoformat()
     print(f"[{today}] 用腦：{brain}，清單 {len(wl)} 檔")
 
-    results = []
+    # ① 我的清單逐檔討論
+    wl_results = []
     for it in wl:
         r = run_one(it["sid"], it.get("name"), brain)
-        results.append(r)
-        print(f"  - {r['name']}({r['sid']}): {'✅' if r['ok'] else '⚠️'}")
+        wl_results.append(r)
+        print(f"  清單 - {r['name']}({r['sid']}): {'✅' if r['ok'] else '⚠️'}")
 
-    # 寫每日總結到知識庫（會同步到手機）
-    lines = [f"# 🧠 每日專家討論總結 {today}", "",
-             f"> 自動排程跑「我的清單」{len(wl)} 檔（腦：{brain}）。各檔完整討論存於同層 `<代號>_<名稱>/`。", ""]
-    for r in results:
-        lines += [f"## {r['name']}({r['sid']})", r["conclusion"] or "（無結論）", ""]
-    out_dir = de.kb_dir() / "_每日討論存檔"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"_每日總結_{today}.md"
+    # ② 選股雷達寫全表 + 取前 3 檔也丟去討論
+    picks = write_screen_report(de.kb_dir(), today) or []
+    pick_results = []
+    for p in picks[:3]:
+        r = run_one(p["sid"], p["name"], brain)
+        r["score"], r["max"] = p["score"], p["max"]
+        pick_results.append(r)
+        print(f"  雷達 - {r['name']}({r['sid']}): {'✅' if r['ok'] else '⚠️'}（{p['score']}/{p['max']}）")
+
+    # 寫每日總結（兩組完整結論）到 vault
+    lines = [f"# 🧠 每日專家討論總結 {today}", "", f"> 腦：{brain}。各檔完整討論存於同層 `<代號>_<名稱>/`。", "",
+             "## ⭐ 我的清單", ""]
+    for r in wl_results:
+        lines += [f"### {r['name']}({r['sid']})", r["conclusion"] or "（無結論）", ""]
+    lines += ["## 🔍 你可能會喜歡（選股雷達挑＋已討論）", ""]
+    for r in pick_results:
+        lines += [f"### {r['name']}({r['sid']})　雷達分 {r.get('score')}/{r.get('max')}", r["conclusion"] or "（無結論）", ""]
+    out = de.kb_dir() / "_每日討論存檔" / f"_每日總結_{today}.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"已寫入總結：{out}")
 
-    # 選股雷達：發掘還沒追蹤的新標的
-    write_screen_report(de.kb_dir(), today)
+    # ③ 組精簡摘要，推播到手機
+    digest = [f"🧠 光之國度 {today} 摘要", macro_data.headline(), "", "⭐ 我的清單"]
+    digest += [_digest_line(r) for r in wl_results]
+    if pick_results:
+        digest += ["", "🔍 你可能會喜歡（雷達挑＋已討論）"]
+        digest += [_digest_line(r) for r in pick_results]
+    digest += ["", f"📂 全文：知識庫/_每日討論存檔/_每日總結_{today}.md"]
+    ok, msg = notify.send("\n".join(digest))
+    print(f"推播：{'✅ 已推到 Telegram' if ok else '⚠️ 未推（' + msg + '）'}")
 
 
 if __name__ == "__main__":

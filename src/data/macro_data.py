@@ -161,3 +161,25 @@ def summary_lines() -> str:
         for q in ts:
             lines.append(f"- {q['label']}：{q['value']}")
     return "\n".join(lines)
+
+
+def headline() -> str:
+    """大環境一行摘要（給推播開頭）。抓不到回空字串。"""
+    bits: list[str] = []
+    risk_off = 0
+    for q in market_quotes():
+        if "VIX" in q["label"]:
+            bits.append(f"VIX {q['value']}")
+            if isinstance(q["value"], (int, float)) and q["value"] > 20:
+                risk_off += 1
+        if "費城" in q["label"] and isinstance(q.get("chg_pct"), (int, float)) and q["chg_pct"] < -1:
+            risk_off += 1
+        if "台幣" in q["label"] and isinstance(q.get("chg_pct"), (int, float)) and q["chg_pct"] > 0:
+            risk_off += 1
+    for q in taiwan_structure():
+        if "外資台指" in q["label"]:
+            bits.append(q["value"].split("・")[0].replace("未平倉", "").strip() if "・" in q["value"] else q["value"][:14])
+            if "淨空" in q["value"]:
+                risk_off += 1
+    tone = "逆風" if risk_off >= 2 else ("偏逆風" if risk_off == 1 else "中性偏穩")
+    return f"🌍 大環境：{tone}" + ("（" + " ・".join(bits) + "）" if bits else "")
