@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.analysis import debate_engine as de
 from src.analysis import screener
+from src.analysis import valuation_bands
 from src.data import gemini_client as gem
 from src.data import inbox
 from src.data import macro_data
@@ -55,8 +56,13 @@ def run_one(sid: str, name: str | None, brain: str) -> dict:
         return {"sid": sid, "name": rname, "conclusion": f"（撈不到數據：{type(e).__name__}）", "chips": "", "ok": False}
     turns = list(de.run_debate(rsid or sid, rname, snap, brain=brain))
     conclusion = next((t["text"] for t in reversed(turns) if t["name"] == "主持人"), "")
+    val = ""
+    vbinfo = valuation_bands.price_bands(rsid or sid, snap)
+    if vbinfo:
+        fb = vbinfo["fwd_bands"]
+        val = f"便宜{fb['cheap']}/合理{fb['fair']}/昂貴{fb['expensive']}・現{vbinfo['price']}({vbinfo['zone'].split('（')[0]})"
     return {"sid": rsid or sid, "name": rname, "conclusion": conclusion,
-            "chips": _chips_brief(snap), "ok": bool(conclusion)}
+            "chips": _chips_brief(snap), "val": val, "ok": bool(conclusion)}
 
 
 def write_screen_report(kb_dir, today: str) -> None:
@@ -94,6 +100,8 @@ def _digest_line(r: dict) -> str:
     if not verdict:
         verdict = (r.get("conclusion") or "").strip().replace("*", "").replace("\n", " ")[:48]
     line = f"• {r['name']}{r['sid']}｜{verdict}"
+    if r.get("val"):
+        line += f"\n　💰估價(預估EPS)：{r['val']}"
     if r.get("chips"):
         line += f"\n　🎯籌碼：{r['chips']}"
     return line

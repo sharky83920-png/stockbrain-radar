@@ -13,6 +13,7 @@ import re
 from datetime import date
 from pathlib import Path
 
+from src.analysis import valuation_bands
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
 from src.data import macro_data
@@ -144,13 +145,17 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
     c = snap.get("chips", {}) or {}
     tr = f.get("three_rates_rising")
     tr_txt = "是" if tr else ("否" if tr is not None else "—")
-    return "\n".join([
+    lines = [
         f"標的：{name}({sid})　資料日 {p.get('date', '—')}",
         f"收盤 {p.get('close')}（漲跌 {p.get('change_pct')}%）",
         f"估值：PER {v.get('per')}｜PBR {v.get('pbr')}｜PEG {v.get('peg')}｜殖利率 {v.get('dividend_yield_pct')}%",
         f"基本面：EPS(近四季) {f.get('eps_ttm')}｜ROE {f.get('roe_ttm_pct')}%｜毛利率 {f.get('gross_margin_pct')}%｜淨利率 {f.get('net_margin_pct')}%｜三率三升 {tr_txt}",
         f"籌碼：外資20日 {c.get('foreign_net_20d_lots')} 張｜投信20日 {c.get('trust_net_20d_lots')} 張｜外資持股 {c.get('foreign_holding_pct')}%",
-    ])
+    ]
+    vb = valuation_bands.brief(sid, snap)
+    if vb:
+        lines.append(vb)
+    return "\n".join(lines)
 
 
 # --- 專家陣容 ---------------------------------------------------------------
@@ -159,7 +164,8 @@ EXPERTS = [
      "role": "你是專家討論的主持人。用 1-2 句宣布今天討論的標的與目前股價，點出一個今天最值得吵的問題，然後請專家發言。"
              "若有『上次討論回顧』，**開場先用一句話對照**（例如：上次我們判斷○○，今天來看…），再進入今天主題。繁體中文。"},
     {"key": "fund", "name": "基本面專家", "emoji": "📊", "kind": "speak",
-     "role": "你是基本面與估值專家。只根據提供的財務/估值數據，依使用者的評分準則判斷這檔基本面強弱、估值便宜還貴。要引用具體數字。2-4 句，繁體中文。"},
+     "role": "你是基本面與估值專家。只根據提供的財務/估值數據，依使用者的評分準則判斷這檔基本面強弱。"
+             "**務必引用資料裡『本益比河流圖』的便宜/合理/昂貴價，明說現價落在哪一區**；電子/成長股以『用預估EPS』那組為主（向前看）。要引用具體數字。3-5 句，繁體中文。"},
     {"key": "chip", "name": "籌碼專家", "emoji": "🎯", "kind": "speak",
      "role": "你是籌碼面專家。只根據法人買賣超與外資持股數據，判斷主力近期偏多還偏空。要引用具體數字。2-4 句，繁體中文。"},
     {"key": "bear", "name": "風險空方", "emoji": "⚠️", "kind": "speak",
