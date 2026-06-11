@@ -121,7 +121,7 @@ def taiwan_structure() -> list[dict]:
             out.append({"label": "外資台指期未平倉", "value": f"{side} {abs(net):,} 口 ・{hint}（{r['date']}）"})
     except Exception:
         pass
-    try:  # 大盤融資餘額（金額，散戶槓桿水位）
+    try:  # 大盤融資餘額（金額，散戶槓桿水位）+ 融券餘額（張，空方力道）
         df = fm.fetch("TaiwanStockTotalMarginPurchaseShortSale", None, start)
         m = df[df["name"] == "MarginPurchaseMoney"]
         if not m.empty:
@@ -130,6 +130,13 @@ def taiwan_structure() -> list[dict]:
             chg = (float(r["TodayBalance"]) - float(r["YesBalance"])) / 1e8
             trend = "增・散戶加槓桿" if chg > 0 else "減・散戶去槓桿"
             out.append({"label": "大盤融資餘額", "value": f"{bal:,.0f} 億元（日變化 {chg:+,.0f} 億・{trend}）（{r['date']}）"})
+        s = df[df["name"] == "ShortSale"]
+        if not s.empty:
+            r = s.sort_values("date").iloc[-1]
+            bal = float(r["TodayBalance"])
+            chg = float(r["TodayBalance"]) - float(r["YesBalance"])
+            trend = "增・空方轉強" if chg > 0 else "減・空方回補"
+            out.append({"label": "大盤融券餘額", "value": f"{bal:,.0f} 張（日變化 {chg:+,.0f} 張・{trend}）（{r['date']}）"})
     except Exception:
         pass
     return out

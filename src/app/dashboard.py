@@ -378,7 +378,7 @@ with tab_debate:
                     for turn in debate_engine.run_debate(rsid, rname, dsnap, brain=brain, analysts=analysts_arg):
                         with st.chat_message("assistant"):
                             st.markdown(f"{turn['emoji']} **{turn['name']}**\n\n{turn['text']}")
-                st.success("討論結束。下一步可加：自動存進 vault 筆記 ＋ 工作排程器定時跑 ＋ 推播到手機。")
+                st.success("討論結束，已自動存進知識庫 `_每日討論存檔/`，下次討論同一檔專家會先回顧。下一步可加：工作排程器定時跑 ＋ 推播到手機。")
     st.caption("⚠️ 公開資訊＋AI 推理，非投資建議。知識庫路徑可用環境變數 STOCKBRAIN_KB_DIR 覆寫。")
 
 

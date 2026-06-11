@@ -66,6 +66,53 @@ def load_knowledge(sid: str) -> dict[str, str]:
     return {"context": context, "stock": stock_txt}
 
 
+# --- 討論自動存檔 + 回讀（讓專家滾雪球變強）--------------------------------
+def _archive_dir() -> Path:
+    return kb_dir() / "_每日討論存檔"
+
+
+def save_discussion(sid: str, name: str, transcript: list[dict]) -> str | None:
+    """把本次討論存成 md：結論摘要放最前面，方便下次回讀。回存檔路徑。"""
+    if not transcript:
+        return None
+    try:
+        d = _archive_dir() / f"{sid}_{name}"
+        d.mkdir(parents=True, exist_ok=True)
+        today = date.today().isoformat()
+        closing = next((t["text"] for t in reversed(transcript) if t["name"] == "主持人"), "")
+        lines = [f"# {today} {name}({sid}) 討論存檔", "", "## 結論摘要", closing, "", "## 完整討論", ""]
+        for t in transcript:
+            lines.append(f"### {t['emoji']} {t['name']}")
+            lines.append(t["text"])
+            lines.append("")
+        path = d / f"{today}.md"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return str(path)
+    except Exception:
+        return None
+
+
+def load_past_discussions(sid: str, limit: int = 2, max_chars: int = 1400) -> str:
+    """讀這檔最近幾次的『結論摘要』，給專家回顧（對照當時看法對了沒）。查不到回空字串。"""
+    root = _archive_dir()
+    if not root.exists():
+        return ""
+    folder = next((p for p in root.iterdir() if p.is_dir() and p.name.split("_")[0] == sid), None)
+    if folder is None:
+        return ""
+    files = sorted(folder.glob("*.md"), reverse=True)[:limit]
+    chunks: list[str] = []
+    for p in files:
+        try:
+            t = p.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        head = t.split("## 完整討論")[0].strip()  # 只取日期＋結論摘要
+        if head:
+            chunks.append(head)
+    return "\n\n---\n\n".join(chunks)[:max_chars]
+
+
 # --- 代號 / 中文名 解析 -----------------------------------------------------
 def resolve_stock(query: str) -> tuple[str | None, str | None]:
     """輸入代號(2330)或中文名(台積電) → 回 (代號, 名稱)。查不到回 (None, None)。"""
@@ -109,7 +156,8 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
 # --- 專家陣容 ---------------------------------------------------------------
 EXPERTS = [
     {"key": "host_open", "name": "主持人", "emoji": "🧑‍⚖️", "kind": "open",
-     "role": "你是專家討論的主持人。用 1-2 句宣布今天討論的標的與目前股價，點出一個今天最值得吵的問題，然後請專家發言。繁體中文。"},
+     "role": "你是專家討論的主持人。用 1-2 句宣布今天討論的標的與目前股價，點出一個今天最值得吵的問題，然後請專家發言。"
+             "若有『上次討論回顧』，**開場先用一句話對照**（例如：上次我們判斷○○，今天來看…），再進入今天主題。繁體中文。"},
     {"key": "fund", "name": "基本面專家", "emoji": "📊", "kind": "speak",
      "role": "你是基本面與估值專家。只根據提供的財務/估值數據，依使用者的評分準則判斷這檔基本面強弱、估值便宜還貴。要引用具體數字。2-4 句，繁體中文。"},
     {"key": "chip", "name": "籌碼專家", "emoji": "🎯", "kind": "speak",
@@ -138,10 +186,14 @@ REBUT_BEAR = {"key": "bear_rebut", "name": "風險空方", "emoji": "⚠️", "k
 
 
 # --- 真腦：Gemini -----------------------------------------------------------
-def _gemini_turn(expert: dict, brief: str, kb: dict, transcript: list[dict]) -> str:
+def _gemini_turn(expert: dict, brief: str, kb: dict, transcript: list[dict], past: str = "") -> str:
     convo = "\n".join(f"{t['name']}：{t['text']}" for t in transcript) or "（尚無發言）"
     ctx = kb.get("context", "")[:2500]
     stock_kb = kb.get("stock", "")[:2000]
+    past_block = (
+        f"=== 上次討論回顧（對照當時看法對了沒、有何變化；沒有就忽略）===\n{past}\n\n"
+        if past else ""
+    )
     if transcript:  # 已有人發言 → 要求點名交鋒，營造辯論感
         speak = (
             f"請以「{expert['name']}」身分發言。"
@@ -155,6 +207,7 @@ def _gemini_turn(expert: dict, brief: str, kb: dict, transcript: list[dict]) -> 
         f"{expert['role']}\n\n"
         f"=== 使用者的投資紀律與脈絡（請依此立場，不要用通用常識）===\n{ctx or '（無）'}\n\n"
         f"=== 這檔的補充資料（投顧報告/使用者筆記）===\n{stock_kb or '（無）'}\n\n"
+        f"{past_block}"
         f"=== 即時數據 ===\n{brief}\n\n"
         f"=== 目前討論記錄 ===\n{convo}\n\n"
         f"{speak}"
@@ -404,6 +457,7 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
     news_f = news_findings(name, sid)
     macro_f = macro_findings(name)
     macro_hard = macro_data.summary_lines()  # yfinance 即時行情 + FRED 美國總經
+    past = load_past_discussions(sid)         # 回讀上次討論結論（滾雪球）
 
     transcript: list[dict] = []
     for expert in order:
@@ -416,7 +470,7 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
             elif k == "pundit":
                 text = _pundit_gemini(findings, name) if brain == "gemini" else _pundit_demo(findings)
             elif brain == "gemini":
-                text = _gemini_turn(expert, brief, kb, transcript)
+                text = _gemini_turn(expert, brief, kb, transcript, past)
             else:
                 text = _demo_turn(expert, name, sid, snap)
         except Exception as e:  # noqa: BLE001
@@ -424,3 +478,6 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
         turn = {"name": expert["name"], "emoji": expert["emoji"], "text": text}
         transcript.append(turn)
         yield turn
+
+    # 討論結束 → 自動存檔，下次回讀
+    save_discussion(sid, name, transcript)
