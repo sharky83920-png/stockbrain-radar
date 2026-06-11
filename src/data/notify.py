@@ -57,6 +57,21 @@ def send(text: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+def get_updates(offset: int | None = None) -> list[dict]:
+    """收 bot 收到的訊息（long-poll）。offset=上次最大 update_id+1，避免重複處理。"""
+    token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        return []
+    params = {"timeout": 0}
+    if offset is not None:
+        params["offset"] = offset
+    try:
+        r = requests.get(_API.format(token=token, method="getUpdates"), params=params, timeout=25)
+        return r.json().get("result", [])
+    except Exception:
+        return []
+
+
 def get_chat_id() -> str:
     """設定輔助：跟 bot 傳過話後呼叫，找出你的 chat_id。"""
     token = os.environ.get("TELEGRAM_TOKEN")

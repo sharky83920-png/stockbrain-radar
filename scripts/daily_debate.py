@@ -28,17 +28,35 @@ from src.data import watchlist
 from src.data.snapshot import build_snapshot
 
 
+def _chips_brief(snap: dict) -> str:
+    """籌碼一行：外資/投信20日買賣超＋融資增減。"""
+    c = snap.get("chips", {}) or {}
+    fn, tn, mc = c.get("foreign_net_20d_lots"), c.get("trust_net_20d_lots"), c.get("margin_change_lots")
+    parts = []
+    if isinstance(fn, (int, float)):
+        parts.append(f"外資{fn:+,.0f}")
+    if isinstance(tn, (int, float)):
+        parts.append(f"投信{tn:+,.0f}")
+    if not parts:
+        return ""
+    s = "／".join(parts) + "張(20日)"
+    if isinstance(mc, (int, float)):
+        s += f"，融資{'↓' if mc < 0 else '↑'}"
+    return s
+
+
 def run_one(sid: str, name: str | None, brain: str) -> dict:
-    """跑一檔討論，回 {sid,name,conclusion,ok}。各檔的完整存檔由 run_debate 內建處理。"""
+    """跑一檔討論，回 {sid,name,conclusion,chips,ok}。各檔完整存檔由 run_debate 內建處理。"""
     rsid, rname = de.resolve_stock(sid)
     rname = rname or name or sid
     try:
         snap = build_snapshot(rsid or sid)
     except Exception as e:  # noqa: BLE001
-        return {"sid": sid, "name": rname, "conclusion": f"（撈不到數據：{type(e).__name__}）", "ok": False}
+        return {"sid": sid, "name": rname, "conclusion": f"（撈不到數據：{type(e).__name__}）", "chips": "", "ok": False}
     turns = list(de.run_debate(rsid or sid, rname, snap, brain=brain))
     conclusion = next((t["text"] for t in reversed(turns) if t["name"] == "主持人"), "")
-    return {"sid": rsid or sid, "name": rname, "conclusion": conclusion, "ok": bool(conclusion)}
+    return {"sid": rsid or sid, "name": rname, "conclusion": conclusion,
+            "chips": _chips_brief(snap), "ok": bool(conclusion)}
 
 
 def write_screen_report(kb_dir, today: str) -> None:
@@ -67,12 +85,18 @@ def write_screen_report(kb_dir, today: str) -> None:
 
 def _digest_line(r: dict) -> str:
     """從結論抓「📌」那行做精簡推播；抓不到就取前 48 字。"""
+    verdict = ""
     for ln in (r.get("conclusion") or "").splitlines():
         s = ln.strip().replace("*", "")
         if s.startswith("📌"):
-            return f"• {r['name']}{r['sid']}｜{s[1:].strip()}"
-    short = (r.get("conclusion") or "").strip().replace("*", "").replace("\n", " ")[:48]
-    return f"• {r['name']}{r['sid']}｜{short}"
+            verdict = s[1:].strip()
+            break
+    if not verdict:
+        verdict = (r.get("conclusion") or "").strip().replace("*", "").replace("\n", " ")[:48]
+    line = f"• {r['name']}{r['sid']}｜{verdict}"
+    if r.get("chips"):
+        line += f"\n　🎯籌碼：{r['chips']}"
+    return line
 
 
 def main() -> None:
