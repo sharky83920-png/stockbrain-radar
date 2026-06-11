@@ -19,7 +19,9 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.analysis import debate_engine as de
+from src.analysis import screener
 from src.data import gemini_client as gem
+from src.data import inbox
 from src.data import watchlist
 from src.data.snapshot import build_snapshot
 
@@ -37,7 +39,38 @@ def run_one(sid: str, name: str | None, brain: str) -> dict:
     return {"sid": rsid or sid, "name": rname, "conclusion": conclusion, "ok": bool(conclusion)}
 
 
+def write_screen_report(kb_dir, today: str) -> None:
+    """跑選股雷達，把『分數高但還沒追蹤』的新標的寫進 vault。"""
+    try:
+        picks = screener.screen(top_n=10)
+    except Exception as e:  # noqa: BLE001
+        print(f"選股雷達失敗：{type(e).__name__}: {e}")
+        return
+    lines = [f"# 🔍 選股雷達 {today}", "",
+             "> 拿你的 SOP 掃候選池，挑『分數高、但你還沒追蹤』的。"
+             "分數=基本面40+籌碼25（技術/題材掃描階段資料不足、不計）。"
+             "想追蹤就把代號丟進『想追蹤的股票.md』。", ""]
+    if not picks:
+        lines.append("（今日候選池沒有通過一票否決又夠高分的新標的。）")
+    for r in picks:
+        lines.append(f"## {r['name']}({r['sid']})　{r['score']}/{r['max']} 分")
+        lines.append("- " + "；".join(r["reasons"]) if r["reasons"] else "- （無加分項）")
+        lines.append("")
+    out = kb_dir / "_每日討論存檔" / f"_選股雷達_{today}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines), encoding="utf-8")
+    print(f"已寫入選股雷達：{out}（{len(picks)} 檔）")
+
+
 def main() -> None:
+    # 先讀手機收件匣，把新加的股票併進清單
+    try:
+        inbox_res = inbox.process_inbox()
+        for r in inbox_res:
+            print(f"  收件匣：「{r['input']}」→ {r['status']}")
+    except Exception as e:  # noqa: BLE001
+        print(f"收件匣處理失敗：{type(e).__name__}: {e}")
+
     wl = watchlist.load()
     if not wl:
         print("清單是空的，沒東西可討論。")
@@ -62,6 +95,9 @@ def main() -> None:
     out = out_dir / f"_每日總結_{today}.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"已寫入總結：{out}")
+
+    # 選股雷達：發掘還沒追蹤的新標的
+    write_screen_report(de.kb_dir(), today)
 
 
 if __name__ == "__main__":
