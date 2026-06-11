@@ -152,7 +152,7 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
         f"基本面：EPS(近四季) {f.get('eps_ttm')}｜ROE {f.get('roe_ttm_pct')}%｜毛利率 {f.get('gross_margin_pct')}%｜淨利率 {f.get('net_margin_pct')}%｜三率三升 {tr_txt}",
         f"籌碼：外資20日 {c.get('foreign_net_20d_lots')} 張｜投信20日 {c.get('trust_net_20d_lots')} 張｜外資持股 {c.get('foreign_holding_pct')}%",
     ]
-    vb = valuation_bands.brief(sid, snap)
+    vb = valuation_bands.brief(sid, snap, name)
     if vb:
         lines.append(vb)
     return "\n".join(lines)

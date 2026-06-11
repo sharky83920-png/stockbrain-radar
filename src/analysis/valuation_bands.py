@@ -71,15 +71,23 @@ def price_bands(sid: str, snap: dict) -> dict | None:
             "ttm_bands": band(ttm_eps), "fwd_bands": fwd, "price": round(price, 1), "zone": zone}
 
 
-def brief(sid: str, snap: dict) -> str:
+def brief(sid: str, snap: dict, name: str | None = None) -> str:
     """給討論/data_brief 用的估價摘要。算不出回空字串。"""
     b = price_bands(sid, snap)
     if not b:
         return ""
     pe, t, f = b["per"], b["ttm_bands"], b["fwd_bands"]
-    return (
-        f"估價(本益比河流圖, 近{pe['years']}年): 便宜/合理/昂貴 PER = {pe['p20']}/{pe['p50']}/{pe['p80']} 倍（現 {pe['current']} 倍）\n"
-        f"  ・用近四季EPS {b['ttm_eps']}：便宜 {t['cheap']} / 合理 {t['fair']} / 昂貴 {t['expensive']}\n"
-        f"  ・用預估EPS {b['fwd_eps']}（成長 {b['growth_pct']}%）：便宜 {f['cheap']} / 合理 {f['fair']} / 昂貴 {f['expensive']}\n"
-        f"  ・現價 {b['price']} → 落在【{b['zone']}】（以預估EPS河流圖判定）"
-    )
+    lines = [
+        f"估價(本益比河流圖, 近{pe['years']}年): 便宜/合理/昂貴 PER = {pe['p20']}/{pe['p50']}/{pe['p80']} 倍（現 {pe['current']} 倍）",
+        f"  ・用近四季EPS {b['ttm_eps']}：便宜 {t['cheap']} / 合理 {t['fair']} / 昂貴 {t['expensive']}",
+        f"  ・用預估EPS {b['fwd_eps']}（成長 {b['growth_pct']}%）：便宜 {f['cheap']} / 合理 {f['fair']} / 昂貴 {f['expensive']}",
+        f"  ・現價 {b['price']} → 落在【{b['zone']}】（以預估EPS河流圖判定）",
+    ]
+    try:
+        from src.analysis import analyst_targets
+        at = analyst_targets.brief(sid, name, snap, b["fwd_eps"])
+        if at:
+            lines.append("  ・" + at + "（可與上面河流圖對照）")
+    except Exception:
+        pass
+    return "\n".join(lines)
