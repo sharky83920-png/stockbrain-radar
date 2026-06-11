@@ -367,19 +367,35 @@ def _news_gemini(f: dict, name: str) -> str:
 # --- 🌍 國際情勢專家：由上而下，抓總經/國際資金面（資金排擠、利率、匯率、地緣）---
 MACRO = {"key": "macro", "name": "國際情勢專家", "emoji": "🌍"}
 
-# 固定掃這些總體面向；個股基本面再好，也擋不住大盤級的資金抽離。
+# 固定掃這些總體＋國際面向；個股基本面再好，也擋不住大盤級的資金抽離。
 _MACRO_QUERIES = [
     "台股 外資 資金 排擠",
     "美股 大型 IPO 吸金",
-    "Fed 利率 台股 資金",
-    "台幣 匯率 外資 流出",
-    "台股 大盤 國際 利空",
+    "Fed 利率 決議",
+    "台幣 匯率 外資",
+    "美國 關稅 貿易戰",
+    "地緣政治 台海",
+    "中國 經濟 刺激政策",
+    "輝達 NVIDIA 訂單",
+    "美國 晶片 出口管制",
 ]
 
 
+_MACRO_NEWS_CACHE: dict[str, tuple[float, list]] = {}
+
+
 def macro_findings(name: str, per_query: int = 3, recent_days: int = 5) -> list[dict]:
-    """抓總經/國際資金面新聞（與個股無關的大盤級事件）。回 [{date,title,source}]，去重依日期排序。
-    recent_days：只抓近 N 天（用 Google News 的 when:Nd 過濾，避免撈到幾個月前的舊聞）。"""
+    """抓總經/國際面新聞（與個股無關的大盤級事件）。同一輪排程快取 30 分鐘、不重複抓。"""
+    import time
+    hit = _MACRO_NEWS_CACHE.get("macro_news")
+    if hit and time.time() - hit[0] < 1800:
+        return hit[1]
+    items = _macro_findings_impl(per_query, recent_days)
+    _MACRO_NEWS_CACHE["macro_news"] = (time.time(), items)
+    return items
+
+
+def _macro_findings_impl(per_query: int = 3, recent_days: int = 5) -> list[dict]:
     seen, items = set(), []
     for q in _MACRO_QUERIES:
         try:
@@ -425,11 +441,13 @@ def _macro_gemini(items: list[dict], name: str, hard: str = "") -> str:
         f"**今天是 {today}。** 下面同時給你『即時硬數據』與『新聞標題』。\n"
         f"⚠️ 鐵則：**硬數據是當前真實數值，最可信**；新聞只有標題、可能落後——"
         f"若標題說『待公布／即將／預期』但日期早於今天，那件事多半已發生，別照抄過期說法。\n"
-        f"請用繁體中文判斷：①用硬數據說現在市場是 risk-on 還 risk-off（VIX、費半、台幣、美債殖利率怎麼走）"
-        f"②台股大盤結構：外資台指期是淨多還淨空（押大盤漲或跌）、大盤融資水位高不高/增減（散戶槓桿與斷頭風險）、"
-        f"是否接近台指期結算日（結算週易有壓盤） ③有沒有『大型美股 IPO 吸金、Fed 利率、外資資金排擠、地緣政治』"
-        f"這類**會抽走台股動能**的事件 ④就算 {name} 基本面沒變，這些總體與大盤力量會不會壓它的股價、讓外資撤出 "
-        f"⑤給後面的專家一句『現在大環境順風還是逆風』。引用具體數字。4-7 句、條列。\n\n"
+        f"請用繁體中文、條列判斷：①全球風向 risk-on/off：綜合 DXY美元指數、標普/那指/道瓊、VIX、"
+        f"美債殖利率與殖利率曲線(倒掛=衰退警訊)、黃金原油、亞股(日經/上證/恆生) "
+        f"②半導體連動：輝達/超微/費半走勢與出口管制消息，對台積電供應鏈的意義 "
+        f"③台股大盤結構：外資台指淨多空、融資券水位、是否近結算日 "
+        f"④重要事件行事曆：點出最近的 CPI/輝達財報/結算日等前瞻風險 "
+        f"⑤就算 {name} 基本面沒變，這些總體力量會不會壓股價、讓外資撤出 "
+        f"⑥結尾一句『現在大環境順風還是逆風』。引用具體數字。6-9 句。\n\n"
         f"{hard_block}"
         f"=== 總經/國際資金面新聞（已過濾近 {len(items)} 則）===\n{data}"
     )
