@@ -13,6 +13,7 @@ import re
 from datetime import date
 from pathlib import Path
 
+from src.analysis import fundamental_forecast
 from src.analysis import valuation_bands
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
@@ -155,6 +156,13 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
     vb = valuation_bands.brief(sid, snap, name)
     if vb:
         lines.append(vb)
+    # 8步驟預估（附在 data_brief 尾部，供估算專家 / Gemini 引用）
+    try:
+        fc = fundamental_forecast.compute(sid)
+        fc_txt = fundamental_forecast.summary(sid, name, fc)
+        lines.append(fc_txt)
+    except Exception:
+        pass
     return "\n".join(lines)
 
 
@@ -166,6 +174,13 @@ EXPERTS = [
     {"key": "fund", "name": "基本面專家", "emoji": "📊", "kind": "speak",
      "role": "你是基本面與估值專家。只根據提供的財務/估值數據，依使用者的評分準則判斷這檔基本面強弱。"
              "**務必引用資料裡『本益比河流圖』的便宜/合理/昂貴價，明說現價落在哪一區**；電子/成長股以『用預估EPS』那組為主（向前看）。要引用具體數字。3-5 句，繁體中文。"},
+    {"key": "forecast", "name": "估算專家", "emoji": "🔢", "kind": "speak",
+     "role": ("你是基本面估算專家，使用孫慶龍8步驟法：以今年累積營收年增率×上年全年營收→預估今年營收，"
+              "再乘TTM稅後淨利率→預估稅後淨利，除以發行股數→預估EPS，最後乘近三年平均盈餘分配率→預估股利。"
+              "你的任務是**直接引用試算結果**（已列在即時數據中），點出這個預估數字與現在市場預期或股價隱含的差距，"
+              "指出最關鍵的上修/下修風險（例如下半年淡旺季差異、客戶集中度、匯率）。"
+              "**不要重複其他專家講過的估值評論**，聚焦『盈餘能見度』與『預估EPS對比現股價的隱含本益比』。"
+              "3-5 句，繁體中文，引用具體數字。")},
     {"key": "chip", "name": "籌碼專家", "emoji": "🎯", "kind": "speak",
      "role": "你是籌碼面專家。只根據法人買賣超與外資持股數據，判斷主力近期偏多還偏空。要引用具體數字。2-4 句，繁體中文。"},
     {"key": "bear", "name": "風險空方", "emoji": "⚠️", "kind": "speak",
@@ -460,6 +475,53 @@ def _macro_gemini(items: list[dict], name: str, hard: str = "") -> str:
     return gem.generate(prompt)
 
 
+# --- 🔢 基本面估算專家：8步驟法（孫慶龍）------------------------------------
+_FC_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _compute_forecast(sid: str) -> dict:
+    """計算8步驟估算，同一輪快取 30 分鐘。"""
+    import time
+    hit = _FC_CACHE.get(sid)
+    if hit and time.time() - hit[0] < 1800:
+        return hit[1]
+    try:
+        result = fundamental_forecast.compute(sid)
+    except Exception as e:
+        result = {"errors": [f"計算失敗: {e}"]}
+    _FC_CACHE[sid] = (time.time(), result)
+    return result
+
+
+def _forecast_demo(result: dict, name: str, sid: str) -> str:
+    return fundamental_forecast.summary(sid, name, result)
+
+
+def _forecast_gemini(result: dict, name: str, sid: str, snap: dict) -> str:
+    fc_txt = fundamental_forecast.summary(sid, name, result)
+    today = date.today().isoformat()
+    p = (snap.get("price", {}) or {})
+    close = p.get("close")
+    # 計算隱含本益比（現價 / 預估EPS）
+    est_eps = result.get("est_eps")
+    implied_per_txt = ""
+    if est_eps and close and est_eps > 0:
+        implied_per = round(float(close) / est_eps, 1)
+        implied_per_txt = f"（現價 {close} ÷ 預估EPS {est_eps} = 隱含本益比 {implied_per} 倍）"
+
+    prompt = (
+        f"你是「估算專家」，使用孫慶龍8步驟法推估今年盈餘。**今天是 {today}。**\n"
+        f"以下是系統依公開財報自動試算的結果，數字請直接引用，不要自行加減：\n\n"
+        f"{fc_txt}\n\n"
+        f"{implied_per_txt}\n\n"
+        f"請用繁體中文，3-5 句，**不要重複河流圖/估值區間**（那是基本面專家的工作），聚焦：\n"
+        f"①直接說預估EPS是多少、預估股利是多少 ②這個預估隱含多少本益比、算便宜還是貴 "
+        f"③指出最大上修/下修風險（如下半年淡旺季、客戶集中度、匯率、淨利率是否可維持） "
+        f"④若數字算不出來（無資料），要說明原因，不要捏造。引用具體數字，精簡有力。"
+    )
+    return gem.generate(prompt)
+
+
 # --- 主流程：generator，一位專家一則 ----------------------------------------
 def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
                analysts: list[str] | None = None):
@@ -470,19 +532,20 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
     kb = load_knowledge(sid)
     by_key = {e["key"]: e for e in EXPERTS}
 
-    # 建立發言順序：開場 → 消息面 → 國際情勢 → 基本面 → 籌碼 →〔名人〕→ 空方 → 交鋒 → 收尾
-    order = [by_key["host_open"], NEWS, MACRO, by_key["fund"], by_key["chip"]]
+    # 建立發言順序：開場 → 消息面 → 國際情勢 → 基本面 → 估算 → 籌碼 →〔名人〕→ 空方 → 交鋒 → 收尾
+    order = [by_key["host_open"], NEWS, MACRO, by_key["fund"], by_key["forecast"], by_key["chip"]]
     findings = None
     if analysts:
         findings = pundit_findings(name, analysts)
         order.append(PUNDIT)  # 名人觀點排在風險空方之前
     order += [by_key["bear"], REBUT_FUND, REBUT_BEAR, by_key["host_close"]]
 
-    # 消息面 + 國際情勢專家每次都即時抓最新情報
+    # 消息面 + 國際情勢 + 8步驟估算，每次都即時計算
     news_f = news_findings(name, sid)
     macro_f = macro_findings(name)
     macro_hard = macro_data.summary_lines()  # yfinance 即時行情 + FRED 美國總經
     past = load_past_discussions(sid)         # 回讀上次討論結論（滾雪球）
+    fc_result = _compute_forecast(sid)        # 8步驟基本面試算
 
     transcript: list[dict] = []
     for expert in order:
@@ -492,6 +555,8 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
                 text = _news_gemini(news_f, name) if brain == "gemini" else _news_demo(news_f)
             elif k == "macro":
                 text = _macro_gemini(macro_f, name, macro_hard) if brain == "gemini" else _macro_demo(macro_f, macro_hard)
+            elif k == "forecast":
+                text = _forecast_gemini(fc_result, name, sid, snap) if brain == "gemini" else _forecast_demo(fc_result, name, sid)
             elif k == "pundit":
                 text = _pundit_gemini(findings, name) if brain == "gemini" else _pundit_demo(findings)
             elif brain == "gemini":
