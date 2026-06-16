@@ -174,13 +174,25 @@ EXPERTS = [
     {"key": "fund", "name": "基本面專家", "emoji": "📊", "kind": "speak",
      "role": "你是基本面與估值專家。只根據提供的財務/估值數據，依使用者的評分準則判斷這檔基本面強弱。"
              "**務必引用資料裡『本益比河流圖』的便宜/合理/昂貴價，明說現價落在哪一區**；電子/成長股以『用預估EPS』那組為主（向前看）。要引用具體數字。3-5 句，繁體中文。"},
-    {"key": "forecast", "name": "估算專家", "emoji": "🔢", "kind": "speak",
+    {"key": "forecast", "name": "EPS估算專家", "emoji": "🔢", "kind": "speak",
      "role": ("你是基本面估算專家，使用孫慶龍8步驟法：以今年累積營收年增率×上年全年營收→預估今年營收，"
               "再乘TTM稅後淨利率→預估稅後淨利，除以發行股數→預估EPS，最後乘近三年平均盈餘分配率→預估股利。"
               "你的任務是**直接引用試算結果**（已列在即時數據中），點出這個預估數字與現在市場預期或股價隱含的差距，"
               "指出最關鍵的上修/下修風險（例如下半年淡旺季差異、客戶集中度、匯率）。"
               "**不要重複其他專家講過的估值評論**，聚焦『盈餘能見度』與『預估EPS對比現股價的隱含本益比』。"
               "3-5 句，繁體中文，引用具體數字。")},
+    {"key": "valuation", "name": "企業估值專家", "emoji": "💎", "kind": "speak",
+     "role": (
+         "你是企業估值專家，奉行孫慶龍價值投資三準則：好公司 × 好價格 × 買低賣高。"
+         "用「挑女婿」多維度框架，對這檔股票進行交叉驗證估值，給出一個**明確的價位判定**：\n"
+         "① 年收入(營收面)→ 股價營收比(P/S)：若有資料，判斷合不合理\n"
+         "② 真正賺多少(獲利面)→ **本益比(PER)**：現價 vs 歷史PER便宜/合理/昂貴區間，電子股以預估EPS為主\n"
+         "③ 存款/房產(資產面)→ **股價淨值比(PBR)**：PBR<1 資產保護，PBR>3 需強獲利撐\n"
+         "④ 未來能賺多少(成長面)→ **PEG**：PEG<1 成長被低估，PEG>2 成長溢價過高\n"
+         "⑤ 存股口訣357驗證(適用存股型)：PER≤15、殖利率≥5%、PBR≤1.5 各達幾項\n"
+         "最後給一句**投資人實戰結論**：現在是『昂貴追高會套』還是『合理可分批』還是『便宜值得佈局』。"
+         "**引用具體數字**，直接說判斷不要模糊。5-7 句，繁體中文。"
+     )},
     {"key": "chip", "name": "籌碼專家", "emoji": "🎯", "kind": "speak",
      "role": "你是籌碼面專家。只根據法人買賣超與外資持股數據，判斷主力近期偏多還偏空。要引用具體數字。2-4 句，繁體中文。"},
     {"key": "bear", "name": "風險空方", "emoji": "⚠️", "kind": "speak",
@@ -273,6 +285,28 @@ def _demo_turn(expert: dict, name: str, sid: str, snap: dict) -> str:
                 "- 最大風險：估值偏高，利空來時先殺估值\n"
                 "- 以上為公開資訊＋AI 推理，不是明牌；最終買賣由你自己按。")
     return "（…）"
+
+
+# --- 💎 企業估值專家：好公司×好價格×買低賣高，孫慶龍挑女婿多維度框架 ------
+def _valuation_demo(expert: dict, name: str, sid: str, snap: dict) -> str:
+    v = snap.get("valuation", {}) or {}
+    f = snap.get("fundamentals", {}) or {}
+    p = snap.get("price", {}) or {}
+    per = v.get("per"); pbr = v.get("pbr"); peg = v.get("peg")
+    div_y = v.get("dividend_yield_pct")
+    close = p.get("close")
+    lines = ["【企業估值 — 挑女婿框架交叉驗證（示範）】"]
+    lines.append(f"② 本益比(PER): {per} 倍｜" + ("偏貴，追價需謹慎。" if isinstance(per,(int,float)) and per and per > 20 else "尚在合理區。"))
+    lines.append(f"③ 股價淨值比(PBR): {pbr} 倍｜" + (">3 需強獲利支撐。" if isinstance(pbr,(int,float)) and pbr and pbr > 3 else "資產面尚可接受。"))
+    lines.append(f"④ PEG: {peg}｜" + ("≤1 成長被低估。" if isinstance(peg,(int,float)) and peg and peg <= 1 else "成長溢價已反映。" if peg else "資料不足。"))
+    # 存股357
+    flags = []
+    if isinstance(per,(int,float)) and per and per <= 15: flags.append("PER≤15✅")
+    if isinstance(div_y,(int,float)) and div_y and div_y >= 5: flags.append("殖利率≥5%✅")
+    if isinstance(pbr,(int,float)) and pbr and pbr <= 1.5: flags.append("PBR≤1.5✅")
+    lines.append(f"⑤ 存股357: {', '.join(flags) if flags else '均未達標，非典型存股標的'}")
+    lines.append("（示範模式，真腦 Gemini 會依所有數據給出完整多方法交叉驗證判斷）")
+    return "\n".join(lines)
 
 
 # --- 🎤 名人觀點專家：上網搜你追蹤的分析師對本檔的最新公開消息 --------------
@@ -532,8 +566,8 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
     kb = load_knowledge(sid)
     by_key = {e["key"]: e for e in EXPERTS}
 
-    # 建立發言順序：開場 → 消息面 → 國際情勢 → 基本面 → 估算 → 籌碼 →〔名人〕→ 空方 → 交鋒 → 收尾
-    order = [by_key["host_open"], NEWS, MACRO, by_key["fund"], by_key["forecast"], by_key["chip"]]
+    # 建立發言順序：開場 → 消息面 → 國際情勢 → 基本面 → EPS估算 → 企業估值 → 籌碼 →〔名人〕→ 空方 → 交鋒 → 收尾
+    order = [by_key["host_open"], NEWS, MACRO, by_key["fund"], by_key["forecast"], by_key["valuation"], by_key["chip"]]
     findings = None
     if analysts:
         findings = pundit_findings(name, analysts)
@@ -557,6 +591,8 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
                 text = _macro_gemini(macro_f, name, macro_hard) if brain == "gemini" else _macro_demo(macro_f, macro_hard)
             elif k == "forecast":
                 text = _forecast_gemini(fc_result, name, sid, snap) if brain == "gemini" else _forecast_demo(fc_result, name, sid)
+            elif k == "valuation":
+                text = _gemini_turn(expert, brief, kb, transcript, past) if brain == "gemini" else _valuation_demo(expert, name, sid, snap)
             elif k == "pundit":
                 text = _pundit_gemini(findings, name) if brain == "gemini" else _pundit_demo(findings)
             elif brain == "gemini":
