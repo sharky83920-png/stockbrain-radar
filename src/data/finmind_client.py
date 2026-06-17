@@ -132,6 +132,14 @@ def news(data_id: str, days: int = 14) -> pd.DataFrame:
     return fetch("TaiwanStockNews", data_id, _default_start(days))
 
 
+def holding_distribution(data_id: str, weeks: int = 16) -> pd.DataFrame:
+    """集保股權分散表（持股分級，週資料）。用於大戶持股比 / 籌碼集中度。
+
+    欄位（待驗證）：date / stock_id / HoldingSharesLevel / people / percent / unit。
+    """
+    return fetch("TaiwanStockHoldingSharesPer", data_id, _default_start(weeks * 7))
+
+
 def stock_info(data_id: str) -> pd.DataFrame:
     """個股基本資訊（stock_name / industry_category）。"""
     return fetch("TaiwanStockInfo", data_id, max_age_days=30)

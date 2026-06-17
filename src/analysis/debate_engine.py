@@ -49,6 +49,39 @@ def _read_md_under(folder: Path, limit_chars: int = 4000) -> str:
     return "\n\n".join(chunks)
 
 
+def load_expert_kb(stem: str | None, limit: int = 3500) -> str:
+    """讀某位專家專屬的知識本：知識庫/專家知識/<stem>.md（培養單一專家用）。"""
+    if not stem:
+        return ""
+    f = kb_dir() / "專家知識" / f"{stem}.md"
+    if not f.exists():
+        return ""
+    try:
+        return f.read_text(encoding="utf-8", errors="ignore").strip()[:limit]
+    except Exception:
+        return ""
+
+
+def load_expert_kb_folder(folder: str, limit: int = 4500) -> str:
+    """讀某資料夾下所有大師知識本（統合專家用）：知識庫/專家知識/<folder>/*.md。"""
+    d = kb_dir() / "專家知識" / folder
+    if not d.exists():
+        return ""
+    chunks, total = [], 0
+    for p in sorted(d.glob("*.md")):
+        try:
+            t = p.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        if not t:
+            continue
+        chunks.append(f"【{p.stem} 的方法】\n{t}")
+        total += len(t)
+        if total > limit:
+            break
+    return "\n\n".join(chunks)
+
+
 def load_knowledge(sid: str) -> dict[str, str]:
     """讀使用者脈絡 + 該股的投顧報告/筆記。回 {'context':..,'stock':..}。"""
     base = kb_dir()
@@ -108,11 +141,13 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
 EXPERTS = [
     {"key": "host_open", "name": "主持人", "emoji": "🧑‍⚖️", "kind": "open",
      "role": "你是專家討論的主持人。用 1-2 句宣布今天討論的標的與目前股價，點出一個今天最值得吵的問題，然後請專家發言。繁體中文。"},
-    {"key": "fund", "name": "基本面專家", "emoji": "📊", "kind": "speak",
+    {"key": "fund", "name": "基本面專家", "emoji": "📊", "kind": "speak", "kb": "基本面專家",
      "role": "你是基本面與估值專家。只根據提供的財務/估值數據，依使用者的評分準則判斷這檔基本面強弱、估值便宜還貴。要引用具體數字。2-4 句，繁體中文。"},
-    {"key": "chip", "name": "籌碼專家", "emoji": "🎯", "kind": "speak",
-     "role": "你是籌碼面專家。只根據法人買賣超與外資持股數據，判斷主力近期偏多還偏空。要引用具體數字。2-4 句，繁體中文。"},
-    {"key": "bear", "name": "風險空方", "emoji": "⚠️", "kind": "speak",
+    {"key": "hsu", "name": "徐黎芳專家", "emoji": "🐆", "kind": "speak", "kb": "籌碼分析師/徐黎芳",
+     "role": "你是徐黎芳（賺豹女王）派的籌碼專家，完全用她的方法判讀：逆韭菜跟大戶、兩股勢力對抗（主力買散戶賣連2-3天）、融資成本線（站上＝動能啟動）、買賣家數差負值（大戶集中買）、異常現象。引用她的框架並結合提供的籌碼數據，給偏多/偏空判斷。2-4 句，繁體中文。"},
+    {"key": "chip_synth", "name": "籌碼統合專家", "emoji": "🎯", "kind": "speak", "kb": "籌碼統合專家", "kb_folder": "籌碼分析師",
+     "role": "你是籌碼統合專家，讀過所有籌碼大師（徐黎芳等）的方法。請綜合『各家方法＋即時籌碼數據（法人買賣超/外資持股/融資）』給整合判斷：目前偏多還偏空、最關鍵的訊號、各家是否一致或有矛盾。可講『徐黎芳會看X、數據顯示Y、綜合是Z』。2-5 句，繁體中文。"},
+    {"key": "bear", "name": "風險空方", "emoji": "⚠️", "kind": "speak", "kb": "風險空方",
      "role": "你是風險與空方代表。任務是挑前面論點的毛病、指出最大風險（估值過高、景氣循環、單一客戶、政策、籌碼鬆動等）。犀利但只講事實與數據。2-4 句，繁體中文。"},
     {"key": "host_close", "name": "主持人", "emoji": "🧑‍⚖️", "kind": "close",
      "role": ("你是主持人，做最終總結。綜合前面討論，依使用者 SOP 的 100 分制（基本面40／籌碼25／技術20／題材15；"
@@ -127,8 +162,14 @@ def _gemini_turn(expert: dict, brief: str, kb: dict, transcript: list[dict]) -> 
     convo = "\n".join(f"{t['name']}：{t['text']}" for t in transcript) or "（尚無發言）"
     ctx = kb.get("context", "")[:2500]
     stock_kb = kb.get("stock", "")[:2000]
+    expert_kb = load_expert_kb(expert.get("kb"))
+    if expert.get("kb_folder"):
+        folder_kb = load_expert_kb_folder(expert["kb_folder"])
+        if folder_kb:
+            expert_kb = (expert_kb + "\n\n=== 各籌碼大師方法彙整 ===\n" + folder_kb).strip()
     prompt = (
         f"{expert['role']}\n\n"
+        f"=== 你的專業知識本（你的方法論，務必依此判讀；使用者持續在養你）===\n{expert_kb or '（尚未建立，用你的專業常識）'}\n\n"
         f"=== 使用者的投資紀律與脈絡（請依此立場，不要用通用常識）===\n{ctx or '（無）'}\n\n"
         f"=== 這檔的補充資料（投顧報告/使用者筆記）===\n{stock_kb or '（無）'}\n\n"
         f"=== 即時數據 ===\n{brief}\n\n"
@@ -154,9 +195,16 @@ def _demo_turn(expert: dict, name: str, sid: str, snap: dict) -> str:
         msg = f"基本面看：EPS(近四季) {eps}、ROE {roe}%、三率三升{'成立' if tr else '不成立' if tr is not None else '資料不足'}。"
         msg += f"估值 PER {per} 倍，" + ("以歷史看不算便宜，要看成長能不能追上。" if isinstance(per, (int, float)) and per and per > 18 else "估值還在合理區。")
         return msg
-    if k == "chip":
-        return f"籌碼面：外資近20日 {fn} 張、投信 {tn} 張。" + (
-            "法人偏買方，動能還在。" if (isinstance(fn, (int, float)) and fn and fn > 0) else "法人沒明顯站買方，追價要小心。")
+    _buy = isinstance(fn, (int, float)) and fn and fn > 0
+    if k == "hsu":
+        return (f"用徐黎芳的招看：要的是『主力買、散戶賣連 2-3 天』。目前外資 {fn} 張、投信 {tn} 張——"
+                + ("法人偏買、方向對，再確認有沒有站上融資成本線（站上＝動能啟動）。" if _buy
+                   else "主力沒明顯站買方，先別追，等籌碼轉、別當接刀的散戶。"))
+    if k == "chip_synth":
+        return (f"統合各家籌碼：外資20日 {fn} 張、投信 {tn} 張、外資持股 {c.get('foreign_holding_pct')}%。"
+                + ("徐黎芳的『主力買散戶賣』成立、偏多；綜合判斷籌碼面偏正向。" if _buy
+                   else "徐黎芳的『主力買散戶賣』還沒成立；綜合判斷籌碼面中性偏空，等訊號。")
+                + "（真腦會讀全部大師方法＋更細數據）")
     if k == "bear":
         return f"我潑冷水：PER {per} 這個估值已經反映不少樂觀預期，一旦營收成長不如預期或國際利空，殺估值的空間不小。先確認你的 −10% 機械停損有設。"
     if k == "host_close":

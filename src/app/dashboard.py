@@ -33,6 +33,13 @@ ANALYST_KEYWORDS = [
     "大摩", "小摩", "摩根", "高盛", "瑞銀", "美林", "花旗", "野村", "瑞信", "麥格理",
 ]
 
+# 「關鍵數據」過濾用：標題同時含這些字＋數字才算與投資數據相關（投顧動向分頁用，去雜訊）
+_KEY_DATA_TERMS = (
+    "目標價", "上看", "上修", "下修", "調升", "調降", "升評", "降評", "評等",
+    "目標", "EPS", "每股", "毛利", "營收", "獲利", "買超", "賣超", "增持",
+    "減持", "上調", "下調", "看好", "看壞", "本益比",
+)
+
 st.set_page_config(page_title="StockBrain Radar", page_icon="📡", layout="wide")
 
 # 名詞解釋（滑鼠移到 ? 會顯示）
@@ -240,6 +247,51 @@ def _metric(col, label, value, suffix="", help_=None):
     col.metric(label, txt, help=help_)
 
 
+def _hist_trend_table(records, period_key, value_key, unit="", fmt="{:.2f}", n_show=4):
+    """台股資訊網風格橫式數字表：值（台股紅漲綠跌，較前期）＋歷史排名。
+    records：完整歷史 list[dict]（時間升冪）。回傳 HTML 字串或 None。"""
+    if not records:
+        return None
+    recs = [r for r in records if r.get(value_key) is not None]
+    if not recs:
+        return None
+    vals = [r[value_key] for r in recs]
+    total = len(vals)
+    start = max(0, total - n_show)
+    th = "".join(
+        f"<th style='padding:4px 12px;border-bottom:1px solid #e3e3e3;color:#666;font-weight:600;text-align:right'>{recs[i][period_key]}</th>"
+        for i in range(start, total)
+    )
+    vtd, rtd = "", ""
+    for i in range(start, total):
+        v = recs[i][value_key]
+        prev = recs[i - 1][value_key] if i > 0 else None
+        if prev is None or v == prev:
+            color, arrow = "#333", ""
+        elif v > prev:           # 上升 → 紅（台股慣例）
+            color, arrow = "#d62728", " ▲"
+        else:                    # 下降 → 綠
+            color, arrow = "#1a9d4b", " ▼"
+        vtd += (f"<td style='padding:4px 12px;text-align:right;color:{color};"
+                f"font-weight:700;font-size:1.05em'>{fmt.format(v)}{unit}{arrow}</td>")
+        rk = sum(1 for x in vals if x > v) + 1
+        if rk == 1:
+            tag = "🔺 歷史新高"
+        elif rk == total:
+            tag = "🔻 歷史新低"
+        else:
+            tag = f"第 {rk} 高／共 {total}"
+        rtd += (f"<td style='padding:2px 12px;text-align:right;color:#999;"
+                f"font-size:0.78em'>{tag}</td>")
+    return (
+        "<table style='border-collapse:collapse;margin-top:2px'>"
+        f"<tr><th></th>{th}</tr>"
+        f"<tr><td style='color:#999;font-size:0.8em;padding-right:6px'>數值</td>{vtd}</tr>"
+        f"<tr><td style='color:#999;font-size:0.78em;padding-right:6px'>歷史排名</td>{rtd}</tr>"
+        "</table>"
+    )
+
+
 # --- Sidebar ---------------------------------------------------------------
 st.sidebar.title("📡 StockBrain Radar")
 st.session_state.setdefault("sid_input", "2330")
@@ -337,8 +389,8 @@ if _wl:
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
 
-tab_debate, tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry = st.tabs(
-    ["🧠 請專家們討論", "🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈"]
+tab_chip, tab_fund, tab_val, tab_report, tab_news, tab_industry, tab_debate = st.tabs(
+    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📑 投顧動向", "📰 相關新聞", "🏭 產業/供應鏈", "🧠 請專家們討論"]
 )
 
 # --- 🧠 請專家們討論 --------------------------------------------------------
@@ -405,6 +457,20 @@ with tab_chip:
         _metric(c, "外資持股比例", chips.get("foreign_holding_pct"), "%", help_=HELP["foreign_hold"])
         _metric(d, "融資餘額", f"{chips.get('margin_balance_lots'):,}" if chips.get("margin_balance_lots") is not None else None, " 張",
                 help_=HELP["margin"] + f"（近45日變化 {chips.get('margin_change_lots')} 張）")
+
+        # 大戶持股 / 籌碼集中度（集保股權分散）
+        if chips.get("big_holder_pct") is not None:
+            st.markdown("##### 🧱 籌碼集中度（集保大戶持股）")
+            e, f2, g = st.columns(3)
+            trend = chips.get("big_holder_trend")
+            _metric(e, "大戶持股比（>400張）", chips.get("big_holder_pct"), "%",
+                    help_="集保股權分散表中，持股 400 張以上者佔總股數比例。越高代表籌碼越集中在大戶手裡（較穩定）。")
+            e.caption(f"近16週趨勢 {trend:+}%（正=籌碼往大戶沉澱）" if trend is not None else "")
+            _metric(f2, "超級大戶（>1000張）", chips.get("super_holder_pct"), "%",
+                    help_="持股 1000 張以上者佔比，徐黎芳所稱『千張大戶』。")
+            g.metric("資料週", chips.get("holding_date", "—"))
+        elif chips.get("concentration_error"):
+            st.caption(f"🧱 籌碼集中度讀取問題：{chips['concentration_error']}（可能需 FinMind token，跑 scripts/probe_holding.py 診斷）")
         st.divider()
         inst = _inst(sid)
         if not inst.empty:
@@ -414,11 +480,23 @@ with tab_chip:
                         "Dealer_self": "自營商（自行買賣）", "Dealer_Hedging": "自營商（避險）",
                         "Foreign_Dealer_Self": "外資自營"}
             inst["法人"] = inst["name"].map(name_map).fillna(inst["name"])
-            keep = inst[inst["法人"].isin(["外資", "投信"])]
-            fig = px.bar(keep, x="date", y="淨買賣（張）", color="法人", barmode="group",
-                         title="三大法人每日淨買賣（外資 vs 投信）")
-            fig.update_layout(xaxis_title="日期")
+            keep = inst[inst["法人"].isin(["外資", "投信"])].sort_values("date").copy()
+            # 累計淨買賣：往上＝這段期間持續買超、往下＝持續賣超，比每日柱狀更能一眼看出方向
+            keep["累計淨買賣（張）"] = keep.groupby("法人")["淨買賣（張）"].cumsum()
+            color_map = {"外資": "#1f4e96", "投信": "#5b9bd5"}
+            fig = px.line(keep, x="date", y="累計淨買賣（張）", color="法人",
+                          color_discrete_map=color_map,
+                          title="外資 / 投信 累計淨買賣趨勢（線往上＝持續買超、往下＝持續賣超）")
+            fig.update_traces(mode="lines", line=dict(width=2.5))
+            fig.add_hline(y=0, line_dash="dot", line_color="gray")
+            fig.update_layout(xaxis_title="日期", yaxis_title="累計淨買賣（張）", hovermode="x unified")
             st.plotly_chart(fig, width="stretch")
+            with st.expander("看每日明細（柱狀）"):
+                figd = px.bar(keep, x="date", y="淨買賣（張）", color="法人",
+                              color_discrete_map=color_map, barmode="group",
+                              title="每日淨買賣（外資 vs 投信）")
+                figd.update_layout(xaxis_title="日期")
+                st.plotly_chart(figd, width="stretch")
     else:
         st.warning(f"籌碼資料讀取問題：{chips.get('error') if isinstance(chips, dict) else chips}")
 
@@ -456,18 +534,22 @@ with tab_fund:
             st.plotly_chart(fig, width="stretch")
         st.divider()
         col1, col2 = st.columns(2)
-        rev = fund.get("revenue_yoy_recent") or []
-        if rev:
-            rdf = pd.DataFrame(rev)
-            fig = px.bar(rdf, x="month", y="yoy_pct", title="月營收年增率 YoY（%）", text="yoy_pct")
-            fig.update_layout(xaxis_title="月份", yaxis_title="年增率 %")
-            col1.plotly_chart(fig, width="stretch")
-        eps = fund.get("eps_recent") or []
-        if eps:
-            edf = pd.DataFrame(eps)
-            fig = px.bar(edf, x="q", y="eps", title="近四季每股盈餘 EPS（元）", text="eps")
-            fig.update_layout(xaxis_title="財報季", yaxis_title="EPS 元")
-            col2.plotly_chart(fig, width="stretch")
+        rev_all = fund.get("revenue_yoy_all") or fund.get("revenue_yoy_recent") or []
+        col1.markdown("##### 月營收年增率 YoY（%）")
+        _html_yoy = _hist_trend_table(rev_all, "month", "yoy_pct", unit="%", fmt="{:.1f}", n_show=6)
+        if _html_yoy:
+            col1.markdown(_html_yoy, unsafe_allow_html=True)
+            col1.caption("▲上升紅、▼下降綠（台股慣例）；歷史排名＝在近 4 年同項目中的高低位。")
+        else:
+            col1.info("無月營收年增資料。")
+        eps_all = fund.get("eps_all") or fund.get("eps_recent") or []
+        col2.markdown("##### 近四季每股盈餘 EPS（元）")
+        _html_eps = _hist_trend_table(eps_all, "q", "eps", unit="", fmt="{:.2f}", n_show=4)
+        if _html_eps:
+            col2.markdown(_html_eps, unsafe_allow_html=True)
+            col2.caption("▲上升紅、▼下降綠（台股慣例）；歷史排名＝在近 4 年各季 EPS 中的高低位。")
+        else:
+            col2.info("無 EPS 資料。")
 
         # 法說會 guidance（公司財測，從新聞擷取）
         st.divider()
@@ -647,23 +729,43 @@ with tab_news:
 
 # --- 投顧動向 --------------------------------------------------------------
 with tab_report:
-    st.caption(
-        "ℹ️ MoneyDJ 免費研究報告區已停更（僅存 2011 年前存檔），故改以「近期新聞中與投顧/"
-        "法人/目標價/評等相關者」呈現分析師動向。"
-    )
+    # 最上方：具名券商目標價彙整（券商名稱 / 目標價 / 日期）
+    st.markdown("#### 🎯 券商目標價彙整")
+    _ref_tp = price.get("close") if isinstance(price, dict) else None
+    _tp_news_df = _tp_news(sid)
+    _tps = (_extract_target_prices(_tp_news_df, _ref_tp)
+            if _tp_news_df is not None and not _tp_news_df.empty else [])
+    if _tps:
+        for t in _tps:
+            st.markdown(
+                f"- **{t['來源/券商']}**　目標價 **{t['目標價']}**　"
+                f"<span style='color:#888'>（{str(t['date'])[:10]}）</span>",
+                unsafe_allow_html=True,
+            )
+        st.caption("※ 僅列新聞標題中**具名券商/機構**者（瑞銀、大摩、高盛、里昂…），泛稱「外資/法人」與媒體名不列。")
+    else:
+        st.info("近期新聞未擷取到具名券商的目標價。")
+
+    st.divider()
+    # 下方：只列「與關鍵數據相關」的新聞/網址（含數字＋投資關鍵字），避免雜訊
+    st.markdown("##### 🔑 關鍵數據相關新聞")
     news = _news(sid)
     if news is not None and not news.empty:
-        mask = news["title"].str.contains("|".join(ANALYST_KEYWORDS), na=False)
-        hits = news[mask]
+        def _is_key(t):
+            t = str(t)
+            return any(k in t for k in _KEY_DATA_TERMS) and bool(re.search(r"\d", t))
+        hits = news[news["title"].apply(_is_key)].head(15)
         if not hits.empty:
-            st.caption(f"過濾出 {len(hits)} 則投顧/法人相關")
-            _ai_summary_block(hits.head(30), "report")
-            st.divider()
-            for _, r in hits.head(30).iterrows():
-                d = str(r["date"])[:16]
-                st.markdown(f"- `{d}` **[{r['source']}]** [{r['title']}]({r['link']})")
+            for _, r in hits.iterrows():
+                d = str(r["date"])[:10]
+                st.markdown(
+                    f"- `{d}` [{r['title']}]({r['link']})　"
+                    f"<span style='color:#aaa;font-size:0.78em'>{r['source']}</span>",
+                    unsafe_allow_html=True,
+                )
+            st.caption("※ 僅列標題含『目標價/評等/EPS/營收/毛利…』等關鍵字且帶數字者，點連結看原文。")
         else:
-            st.info("近期新聞中沒有明顯的投顧/法人/目標價相關內容。")
+            st.info("近期沒有含關鍵數據（目標價/評等/EPS…）的投顧或法人新聞。")
     else:
         st.info("近期查無新聞。")
 

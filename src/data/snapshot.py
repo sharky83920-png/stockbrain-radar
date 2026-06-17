@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
@@ -37,6 +38,47 @@ def _price_section(sid: str) -> dict[str, Any]:
         "change_pct": round(pct, 2),
         "volume_lots": int(last["Trading_Volume"] // 1000),
     }
+
+
+_LEVEL_LOWER = re.compile(r"(\d[\d,]*)")
+
+
+def _concentration(hd: pd.DataFrame) -> dict[str, Any] | None:
+    """從集保股權分散表算大戶持股比(>400張/>1000張)與集中度趨勢。防禦式：欄位名不確定也不爆。"""
+    level_col = next((c for c in hd.columns if "Level" in c or "級距" in c), None)
+    pct_col = next((c for c in hd.columns if "percent" in c.lower() or "比例" in c), None)
+    if not level_col or not pct_col or "date" not in hd.columns:
+        return None
+
+    def big(group: pd.DataFrame, thr: int) -> float:
+        total = 0.0
+        for _, r in group.iterrows():
+            lvl = str(r[level_col])
+            if "total" in lvl.lower() or "合計" in lvl or "差異" in lvl:
+                continue
+            m = _LEVEL_LOWER.search(lvl)
+            if not m:
+                continue
+            if int(m.group(1).replace(",", "")) >= thr:
+                try:
+                    total += float(r[pct_col])
+                except (TypeError, ValueError):
+                    continue
+        return round(total, 2)
+
+    dates = list(dict.fromkeys(hd.sort_values("date")["date"]))
+    if not dates:
+        return None
+    latest = hd[hd["date"] == dates[-1]]
+    out = {
+        "big_holder_pct": big(latest, 400_000),      # >400 張
+        "super_holder_pct": big(latest, 1_000_000),  # >1000 張
+        "holding_date": dates[-1],
+    }
+    if len(dates) >= 2:
+        prev = big(hd[hd["date"] == dates[0]], 400_000)
+        out["big_holder_trend"] = round(out["big_holder_pct"] - prev, 2)  # 正=大戶持股比上升(籌碼沉澱)
+    return out
 
 
 def _chips_section(sid: str) -> dict[str, Any]:
@@ -73,6 +115,16 @@ def _chips_section(sid: str) -> dict[str, Any]:
     if not sh.empty:
         out["foreign_holding_pct"] = float(sh.iloc[-1]["ForeignInvestmentSharesRatio"])
 
+    # 大戶持股比 / 籌碼集中度（集保股權分散，週資料）— best-effort
+    try:
+        hd = fm.holding_distribution(sid, weeks=16)
+        if not hd.empty:
+            conc = _concentration(hd)
+            if conc:
+                out.update(conc)
+    except Exception as e:  # noqa: BLE001
+        out["concentration_error"] = f"{type(e).__name__}: {e}"
+
     return out
 
 
@@ -85,23 +137,25 @@ def _fundamentals_section(sid: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
 
     # 月營收 YoY
-    rev = fm.month_revenue(sid, days=620)
+    rev = fm.month_revenue(sid, days=1600)  # ~4 年，供歷史排名
     if not rev.empty:
         rev = rev.copy()
         by_ym = {(int(r["revenue_year"]), int(r["revenue_month"])): float(r["revenue"]) for _, r in rev.iterrows()}
         months = sorted(by_ym.keys())
-        yoy_list = []
-        for (y, m) in months[-3:]:
+        yoy_all = []
+        for (y, m) in months:
             prev = by_ym.get((y - 1, m))
             if prev:
-                yoy_list.append({"month": f"{y}-{m:02d}", "yoy_pct": round((by_ym[(y, m)] - prev) / prev * 100, 1)})
-        out["revenue_yoy_recent"] = yoy_list
+                yoy_all.append({"month": f"{y}-{m:02d}", "yoy_pct": round((by_ym[(y, m)] - prev) / prev * 100, 1)})
+        out["revenue_yoy_all"] = yoy_all          # 完整歷史（給歷史排名/趨勢用）
+        out["revenue_yoy_recent"] = yoy_all[-3:]  # 近 3 個月（向後相容）
 
     # 財報：EPS / 毛利率 / 營益率
-    fs = fm.financial_statements(sid, days=500)
+    fs = fm.financial_statements(sid, days=1600)  # ~4 年，供歷史排名
     if not fs.empty:
         eps = _quarterly_series(fs, "EPS")
         if eps:
+            out["eps_all"] = [{"q": d, "eps": v} for d, v in eps]   # 完整歷史（給歷史排名用）
             out["eps_recent"] = [{"q": d, "eps": v} for d, v in eps[-4:]]
             out["eps_ttm"] = round(sum(v for _, v in eps[-4:]), 2)
             # EPS YoY（同季去年比）
