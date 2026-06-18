@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import requests
 
@@ -16,7 +17,7 @@ try:
 except Exception:
     pass
 
-DEFAULT_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_MODEL = "gemini-2.5-flash"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -29,22 +30,30 @@ def is_configured() -> bool:
 
 
 def _model() -> str:
-    return os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)
+    return os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
 
 
-def generate(prompt: str, timeout: int = 60) -> str:
+def generate(prompt: str, timeout: int = 90) -> str:
     key = os.environ.get("GEMINI_KEY")
     if not key:
         raise GeminiNotConfigured("未設定 GEMINI_KEY（請在 .env 填入，與 GAS 晨報同一把）")
     url = ENDPOINT.format(model=_model())
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    resp = requests.post(url, params={"key": key}, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Gemini 回應格式非預期：{data}") from e
+
+    for attempt in range(3):
+        resp = requests.post(url, params={"key": key}, json=payload, timeout=timeout, verify=False)
+        if resp.status_code == 429:
+            wait = 30 * (attempt + 1)   # 30s / 60s / 90s
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"Gemini 回應格式非預期：{data}") from e
+
+    raise RuntimeError("Gemini 429 Too Many Requests，已重試 3 次仍失敗，請稍後再試")
 
 
 def summarize_news(titles: list[str], stock_id: str) -> str:

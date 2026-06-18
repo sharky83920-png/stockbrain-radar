@@ -27,6 +27,7 @@ from src.data import analysts as analysts_mod
 from src.data import news_sources
 from src.data import watchlist
 from src.data.snapshot import build_snapshot
+from src.data import theme_data as td
 
 # 投顧/法人相關新聞的過濾關鍵字（MoneyDJ 免費研究報告區已停更至 2011，改用新聞過濾）
 ANALYST_KEYWORDS = [
@@ -371,6 +372,9 @@ def _pos_red_neg_green(v):
 # --- Sidebar ---------------------------------------------------------------
 st.sidebar.title("📡 StockBrain Radar")
 st.session_state.setdefault("sid_input", "2330")
+# 市場地圖點擊跳轉：用暫存 key 避免「widget 已渲染後不能改 state」的限制
+if "_map_pending_sid" in st.session_state and st.session_state["_map_pending_sid"]:
+    st.session_state["sid_input"] = st.session_state.pop("_map_pending_sid")
 sid = st.sidebar.text_input("股票代號（如 2330）", key="sid_input").strip()
 st.sidebar.caption("資料來源：FinMind / Google News。當日快取，僅供個人研究。")
 
@@ -465,8 +469,8 @@ if _wl:
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
 
-tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry, tab_debate = st.tabs(
-    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論"]
+tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry, tab_debate, tab_map = st.tabs(
+    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論", "🗺️ 市場地圖"]
 )
 
 # --- 🧠 請專家們討論 --------------------------------------------------------
@@ -895,3 +899,197 @@ with tab_industry:
 
 st.sidebar.divider()
 st.sidebar.caption("⚠️ 僅供個人研究，非投資建議。")
+
+# ---------------------------------------------------------------------------
+# 🗺️  市場地圖
+# ---------------------------------------------------------------------------
+_MAP_UP_RED     = "#d62728"
+_MAP_DOWN_GREEN = "#1ca35a"
+_MAP_NEUTRAL    = "#808495"
+
+_WEIGHT_BADGE = {
+    "core": ("<span style='background:#d62728;color:#fff;padding:1px 7px;border-radius:10px;"
+             "font-size:0.75em;font-weight:600'>核心受惠</span>"),
+    "mid":  ("<span style='background:#e07b39;color:#fff;padding:1px 7px;border-radius:10px;"
+             "font-size:0.75em;font-weight:600'>間接受惠</span>"),
+    "side": ("<span style='background:#555;color:#ddd;padding:1px 7px;border-radius:10px;"
+             "font-size:0.75em;font-weight:600'>題材相關</span>"),
+}
+
+
+def _pct_color(pct: float) -> str:
+    if pct >= 0.3:
+        return _MAP_UP_RED
+    if pct <= -0.3:
+        return _MAP_DOWN_GREEN
+    return _MAP_NEUTRAL
+
+
+def _pct_badge(pct: float, has_data: bool) -> str:
+    if not has_data:
+        return "<span style='color:#888'>–</span>"
+    color = _pct_color(pct)
+    arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "─")
+    return f"<span style='color:{color};font-weight:600'>{arrow} {pct:+.2f}%</span>"
+
+
+with tab_map:
+    # 把市場地圖裡的 st.button 樣式改成乾淨的 chip
+    st.markdown("""
+    <style>
+    [data-testid="stHorizontalBlock"] button[kind="secondary"] p { font-size:0.82em; }
+    div[data-testid="column"]:has(button[data-testid^="map_jump"]) button {
+        background:transparent !important;
+        border:1px solid #444 !important;
+        border-radius:6px !important;
+        padding:2px 8px !important;
+        font-size:0.82em !important;
+        color:#ccc !important;
+        font-family:monospace !important;
+        min-height:0 !important;
+        height:auto !important;
+    }
+    </style>""", unsafe_allow_html=True)
+
+    with st.spinner("載入報價中…"):
+        try:
+            theme_map, changes = td.get_theme_changes()
+        except Exception as _e:  # noqa: BLE001
+            st.error(f"市場地圖載入失敗：{_e}")
+            theme_map, changes = {}, {}
+
+    if not theme_map:
+        st.stop()
+
+    _has_data = any(v != 0.0 for v in changes.values())
+
+    st.markdown("#### 🗺️ 市場地圖")
+
+    st.divider()
+
+    # ── 產業鏈切換 ──
+    _chain_names = [f"{c.get('emoji','')} {c['name']}" for c in theme_map["chains"]]
+    _sel_chain = st.radio("選擇產業鏈", _chain_names, horizontal=True, key="map_chain_radio")
+    _chain_idx = _chain_names.index(_sel_chain)
+    _cur_chain = theme_map["chains"][_chain_idx]
+
+    st.markdown(
+        f"<p style='color:#aaa;font-size:0.85em;margin-top:4px'>"
+        f"圖例：{_WEIGHT_BADGE['core']} &nbsp; {_WEIGHT_BADGE['mid']} &nbsp; {_WEIGHT_BADGE['side']}"
+        f"　　點股票代號可跳到個股研究</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 各 Stage 卡片 ──
+    for stage in _cur_chain.get("stages", []):
+        stocks = stage.get("stocks", [])
+        _spcts = [changes.get(s["sid"], 0.0) for s in stocks]
+        _savg  = sum(_spcts) / len(_spcts) if _spcts else 0.0
+        _sh_color = _MAP_UP_RED if _savg > 0 and _has_data else (_MAP_DOWN_GREEN if _savg < 0 and _has_data else _cur_chain.get("color","#555"))
+
+        # 卡片標頭
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:10px;margin:18px 0 6px 0'>"
+            f"<span style='background:{_sh_color};color:#fff;padding:3px 10px;"
+            f"border-radius:6px;font-size:0.82em;font-weight:700;white-space:nowrap'>"
+            f"{stage['step']}</span>"
+            f"<span style='font-size:1.05em;font-weight:700'>{stage['name']}</span>"
+            f"<span style='margin-left:auto;color:#888;font-size:0.85em'>{len(stocks)} 檔</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # 表格標頭
+        _hc = st.columns([1, 1.8, 5])
+        _hc[0].markdown("**代號**")
+        _hc[1].markdown("**公司**")
+        _hc[2].markdown("**具體在做什麼**")
+        st.markdown("<hr style='margin:2px 0 4px 0;border-color:#333'>", unsafe_allow_html=True)
+
+        for s in stocks:
+            _ssid = s["sid"]
+            _rc   = st.columns([1, 1.8, 5])
+
+            # 代號 → 點擊跳轉按鈕
+            if _rc[0].button(_ssid, key=f"map_jump_{_cur_chain['id']}_{stage['id']}_{_ssid}",
+                              help=f"點擊 → 跳至 {s['name']} 個股研究"):
+                st.session_state["_map_pending_sid"] = _ssid
+                st.rerun()
+
+            _rc[1].markdown(
+                f"{s['name']}<br>{_WEIGHT_BADGE.get(s.get('weight','side'), '')}",
+                unsafe_allow_html=True,
+            )
+            _rc[2].markdown(
+                f"<span style='font-size:0.9em;color:#ccc'>{s.get('note','')}</span>",
+                unsafe_allow_html=True,
+            )
+
+        # ── 🤖 AI 深入分析這個環節 ──
+        _stage_key = f"stage_analysis_{_cur_chain['id']}_{stage['id']}"
+        if gem.is_configured():
+            if st.button(
+                f"🤖 深入了解「{stage['name']}」這個環節",
+                key=f"btn_stage_{_cur_chain['id']}_{stage['id']}",
+            ):
+                st.session_state[_stage_key] = None   # 清快取強制重生
+                st.rerun()
+
+            _cached = st.session_state.get(_stage_key, "NOT_SET")
+            if _cached == "NOT_SET":
+                pass   # 尚未按，不顯示
+            elif _cached is None:
+                # 需要生成
+                _stock_lines = "\n".join(
+                    f"   - {s['name']}({s['sid']})：{_WEIGHT_BADGE.get(s.get('weight','side'),'').replace('<','').replace('>','').split('>')[-1] if '>' in _WEIGHT_BADGE.get(s.get('weight','side'),'') else s.get('weight','')}，{s.get('note','')}"
+                    for s in stocks
+                )
+                _prompt = f"""你是台灣股市產業分析師，請針對以下產業環節做深度說明，用台灣投資人看得懂的語言。
+
+產業鏈：{_cur_chain['name']}
+環節：{stage['step']} {stage['name']}
+
+本環節的個股（含角色）：
+{_stock_lines}
+
+請回答以下三個問題，條列清楚，不要廢話：
+
+① 【這個環節在做什麼？】
+   - 白話說明這個環節的技術/商業角色（假設讀者完全不懂，需要從頭解釋）
+   - 在整條供應鏈的位置：上游是什麼、下游是什麼、為什麼這個環節重要
+   - 有什麼技術門檻讓不是每家公司都能做
+
+② 【各家公司的實際地位】
+   - 逐一說明上面每家公司在這個環節的真實競爭力
+   - 誰是最核心受惠？為什麼？（市佔、客戶結構、技術護城河）
+   - 誰是邊緣角色？邊緣在哪裡？
+
+③ 【目前景氣與風險】
+   - 這個環節目前的供需狀況
+   - 主要催化劑（什麼事情發生會讓這個環節爆發）
+   - 主要風險（什麼事情發生會讓這個環節反轉）
+
+繁體中文，每個問題各自分段，用數字或符號條列。"""
+                with st.spinner(f"Gemini 分析「{stage['name']}」中…"):
+                    try:
+                        _result = gem.generate(_prompt, timeout=90)
+                        st.session_state[_stage_key] = _result
+                        st.rerun()
+                    except Exception as _ge:
+                        st.error(f"Gemini 生成失敗：{_ge}")
+                        st.session_state[_stage_key] = "ERROR"
+            elif _cached != "ERROR":
+                with st.expander(f"🤖 AI 產業分析：{stage['name']}", expanded=True):
+                    st.markdown(_cached)
+                    st.caption("※ 由 Gemini 依公開知識生成，數字請再核對，快取 24h。")
+        else:
+            st.caption("🤖 想看這個環節的 AI 深度分析？在 `.env` 填 `GEMINI_KEY` 並重啟即可。")
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    st.divider()
+    st.caption(
+        "💡 想新增/修改個股或產業鏈？開啟 "
+        r"`G:\我的雲端硬碟\stockbrain\工具欄\theme_map.json`"
+        " 直接編輯，重新整理頁面即生效（30分鐘自動更新報價）。"
+    )
