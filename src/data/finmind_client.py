@@ -65,7 +65,7 @@ def fetch(
     if token:
         params["token"] = token
 
-    resp = requests.get(FINMIND_URL, params=params, timeout=timeout)
+    resp = requests.get(FINMIND_URL, params=params, timeout=timeout, verify=False)
     resp.raise_for_status()
     payload = resp.json()
     if payload.get("status") != 200:
