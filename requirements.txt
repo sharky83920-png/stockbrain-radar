@@ -4,3 +4,4 @@ streamlit>=1.40
 plotly>=5.24
 python-dotenv>=1.0
 truststore>=0.9
+yfinance>=0.2          # 國際情勢專家：即時市場行情（台幣/費半/VIX/美債殖利率）

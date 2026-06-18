@@ -154,3 +154,14 @@ def stock_name(data_id: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+def cash_flow(data_id: str, days: int = 500) -> pd.DataFrame:
+    """現金流量表（長格式，type 含 CashFlowsFromOperatingActivities /
+    PropertyAndPlantAndEquipment(資本支出) ...）。"""
+    return fetch("TaiwanStockCashFlowsStatement", data_id, _default_start(days))
+
+
+def all_stock_info() -> pd.DataFrame:
+    """全市場個股基本資訊（含 industry_category），供同業比較用。快取 30 天。"""
+    return fetch("TaiwanStockInfo", max_age_days=30)

@@ -19,6 +19,8 @@ from src.analysis import guidance as guidance_mod
 from src.analysis import industry as industry_mod
 from src.analysis import news_digest
 from src.analysis.valuation import pe_band
+from src.app import valuation_display as vdisp
+from src.utils import read_reports
 from src.data import finmind_client as fm
 from src.data import gemini_client as gem
 from src.data import analysts as analysts_mod
@@ -79,9 +81,39 @@ def _pe_band(sid: str):
     return pe_band(sid)
 
 
+@st.cache_data(ttl=3600)
+def _margin_short(sid: str):
+    """融資融券餘額時序（張）：融資=MarginPurchaseTodayBalance、融券=ShortSaleTodayBalance。"""
+    df = fm.margin_short(sid, days=90)
+    if df is None or df.empty:
+        return df
+    df = df.sort_values("date").copy()
+    df["融資餘額"] = df["MarginPurchaseTodayBalance"]
+    df["融券餘額"] = df["ShortSaleTodayBalance"]
+    return df
+
+
 @st.cache_data(ttl=86400)
 def _name(sid: str):
     return fm.stock_name(sid)
+
+
+@st.cache_data(ttl=86400)
+def _company_profile(sid: str):
+    """用 Gemini 生成『這間公司在做什麼』白話簡介，快取一天（省 token）。沒設 key 回 None。"""
+    if not gem.is_configured():
+        return None
+    nm = _name(sid) or ""
+    prompt = (
+        f"用繁體中文，針對台股 {nm}({sid})，條列 4~6 點介紹這間公司實際在『做什麼』："
+        f"①一句話定位（做什麼的）②主要產品/業務與各自營收占比（知道就寫）"
+        f"③技術或製程強項 ④主要客戶/應用領域 ⑤主要競爭對手。"
+        f"白話、精簡、每點一行，不要投資建議、不要估值。"
+    )
+    try:
+        return gem.generate(prompt)
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=1800)
@@ -269,9 +301,9 @@ def _hist_trend_table(records, period_key, value_key, unit="", fmt="{:.2f}", n_s
         if prev is None or v == prev:
             color, arrow = "#333", ""
         elif v > prev:           # 上升 → 紅（台股慣例）
-            color, arrow = "#d62728", " ▲"
+            color, arrow = UP_RED, " ▲"
         else:                    # 下降 → 綠
-            color, arrow = "#1a9d4b", " ▼"
+            color, arrow = DOWN_GREEN, " ▼"
         vtd += (f"<td style='padding:4px 12px;text-align:right;color:{color};"
                 f"font-weight:700;font-size:1.05em'>{fmt.format(v)}{unit}{arrow}</td>")
         rk = sum(1 for x in vals if x > v) + 1
@@ -290,6 +322,50 @@ def _hist_trend_table(records, period_key, value_key, unit="", fmt="{:.2f}", n_s
         f"<tr><td style='color:#999;font-size:0.78em;padding-right:6px'>歷史排名</td>{rtd}</tr>"
         "</table>"
     )
+
+
+# 台股慣例配色：紅＝上漲/買超、綠＝下跌/賣超
+UP_RED = "#d62728"
+DOWN_GREEN = "#1ca35a"
+NEUTRAL_GRAY = "#808495"
+BUYSELL_COLORS = {"買超": UP_RED, "賣超": DOWN_GREEN}
+
+
+def _flow_metric(col, label, lots, unit="張", help_=None):
+    """買賣超流量指標：買超紅▲、賣超綠▼（台股慣例）。help_ 以 HTML title 保留 hover 說明。"""
+    tip = f' title="{help_}"' if help_ else ""
+    note = " ⓘ" if help_ else ""
+    if lots is None:
+        col.markdown(
+            f'<div style="font-size:0.8rem;color:{NEUTRAL_GRAY}"{tip}>{label}{note}</div>'
+            f'<div style="font-size:1.7rem;font-weight:600;color:{NEUTRAL_GRAY}">—</div>',
+            unsafe_allow_html=True)
+        return
+    if lots > 0:
+        color, arrow, tag = UP_RED, "▲", "買超"
+    elif lots < 0:
+        color, arrow, tag = DOWN_GREEN, "▼", "賣超"
+    else:
+        color, arrow, tag = NEUTRAL_GRAY, "—", "持平"
+    col.markdown(
+        f'<div style="font-size:0.8rem;color:{NEUTRAL_GRAY}"{tip}>{label}{note}</div>'
+        f'<div style="font-size:1.7rem;font-weight:600;color:{color}">'
+        f'{arrow} {abs(lots):,.0f} <span style="font-size:1rem">{unit}</span></div>'
+        f'<div style="font-size:0.85rem;color:{color}">{tag}</div>',
+        unsafe_allow_html=True)
+
+
+def _pos_red_neg_green(v):
+    """表格用：數值為正→紅、負→綠（台股慣例）。"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if x > 0:
+        return f"color:{UP_RED};font-weight:600"
+    if x < 0:
+        return f"color:{DOWN_GREEN};font-weight:600"
+    return ""
 
 
 # --- Sidebar ---------------------------------------------------------------
@@ -389,16 +465,26 @@ if _wl:
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
 
-tab_chip, tab_fund, tab_val, tab_report, tab_news, tab_industry, tab_debate = st.tabs(
-    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📑 投顧動向", "📰 相關新聞", "🏭 產業/供應鏈", "🧠 請專家們討論"]
+tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry, tab_debate = st.tabs(
+    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論"]
 )
 
 # --- 🧠 請專家們討論 --------------------------------------------------------
 with tab_debate:
     st.markdown("#### 🧠 請專家們討論")
-    st.caption("輸入股票代號或中文名稱，專家會讀『即時數據＋你的知識庫』輪流討論、最後給結論。")
-    dc1, dc2 = st.columns([3, 1])
+    st.caption("輸入代號/中文名，專家即時抓『最新數據＋個股新聞＋投顧動向＋🌍國際資金面＋你的知識庫』，互相點名辯論、交鋒兩輪後給結論與進場時機。")
+    dc1, dc2, dc3 = st.columns([2, 1, 1])
     dq = dc1.text_input("股票代號或中文名稱（如 2330 或 台積電）", value=sid, key="debate_q").strip()
+
+    # 「去讀投顧報告」按鈕
+    if dc3.button("📄 去讀投顧報告", width="stretch"):
+        with st.spinner("掃描待閱讀區..."):
+            report_result = read_reports.read_pending_reports()
+            st.success(report_result)
+
+    # 「請專家們討論」按鈕
+    run_debate_btn = dc2.button("🚀 請專家們討論", width="stretch")
+
     demo_force = st.checkbox(
         "示範模式（假腦，不花錢）", value=not gem.is_configured(),
         help="勾選＝用罐頭發言示範流程、不呼叫 API、不花錢。取消＝用 Gemini 真腦（需在 .env 設好 GEMINI_KEY）。",
@@ -410,7 +496,6 @@ with tab_debate:
         help="多一位『名人觀點專家』，用 Google News 搜你左側『我的分析師』清單對這檔的近期公開報導帶進討論。"
              "⚠️ 付費會員/訂閱內容搜不到（要自己貼進知識庫）。",
     )
-    run_debate_btn = dc2.button("🚀 請專家們討論", width="stretch")
     if run_debate_btn:
         rsid, rname = debate_engine.resolve_stock(dq)
         if not rsid:
@@ -430,7 +515,7 @@ with tab_debate:
                     for turn in debate_engine.run_debate(rsid, rname, dsnap, brain=brain, analysts=analysts_arg):
                         with st.chat_message("assistant"):
                             st.markdown(f"{turn['emoji']} **{turn['name']}**\n\n{turn['text']}")
-                st.success("討論結束。下一步可加：自動存進 vault 筆記 ＋ 工作排程器定時跑 ＋ 推播到手機。")
+                st.success("討論結束，已自動存進知識庫 `_每日討論存檔/`，下次討論同一檔專家會先回顧。下一步可加：工作排程器定時跑 ＋ 推播到手機。")
     st.caption("⚠️ 公開資訊＋AI 推理，非投資建議。知識庫路徑可用環境變數 STOCKBRAIN_KB_DIR 覆寫。")
 
 
@@ -452,8 +537,10 @@ def _ai_summary_block(news_df, key_suffix):
 with tab_chip:
     if isinstance(chips, dict) and "error" not in chips:
         a, b, c, d = st.columns(4)
-        _metric(a, f"外資淨買賣（近{chips.get('window_days','?')}日）", chips.get("foreign_net_20d_lots"), " 張", help_=HELP["foreign_net"])
-        _metric(b, "投信淨買賣（同期）", chips.get("trust_net_20d_lots"), " 張", help_=HELP["trust_net"])
+        _flow_metric(a, f"外資淨買賣（近{chips.get('window_days','?')}日）",
+                     chips.get("foreign_net_20d_lots"), help_=HELP["foreign_net"])
+        _flow_metric(b, "投信淨買賣（同期）",
+                     chips.get("trust_net_20d_lots"), help_=HELP["trust_net"])
         _metric(c, "外資持股比例", chips.get("foreign_holding_pct"), "%", help_=HELP["foreign_hold"])
         _metric(d, "融資餘額", f"{chips.get('margin_balance_lots'):,}" if chips.get("margin_balance_lots") is not None else None, " 張",
                 help_=HELP["margin"] + f"（近45日變化 {chips.get('margin_change_lots')} 張）")
@@ -480,23 +567,54 @@ with tab_chip:
                         "Dealer_self": "自營商（自行買賣）", "Dealer_Hedging": "自營商（避險）",
                         "Foreign_Dealer_Self": "外資自營"}
             inst["法人"] = inst["name"].map(name_map).fillna(inst["name"])
-            keep = inst[inst["法人"].isin(["外資", "投信"])].sort_values("date").copy()
-            # 累計淨買賣：往上＝這段期間持續買超、往下＝持續賣超，比每日柱狀更能一眼看出方向
-            keep["累計淨買賣（張）"] = keep.groupby("法人")["淨買賣（張）"].cumsum()
-            color_map = {"外資": "#1f4e96", "投信": "#5b9bd5"}
-            fig = px.line(keep, x="date", y="累計淨買賣（張）", color="法人",
-                          color_discrete_map=color_map,
-                          title="外資 / 投信 累計淨買賣趨勢（線往上＝持續買超、往下＝持續賣超）")
-            fig.update_traces(mode="lines", line=dict(width=2.5))
-            fig.add_hline(y=0, line_dash="dot", line_color="gray")
-            fig.update_layout(xaxis_title="日期", yaxis_title="累計淨買賣（張）", hovermode="x unified")
+            keep = inst[inst["法人"].isin(["外資", "投信"])].copy()
+            # 每日淨買賣 bar：只看外資（日內主力），買超紅、賣超綠，乾淨無花紋
+            fdf = keep[keep["法人"] == "外資"].copy()
+            fdf["方向"] = fdf["淨買賣（張）"].apply(
+                lambda v: "買超" if v > 0 else ("賣超" if v < 0 else "持平"))
+            fig = px.bar(fdf, x="date", y="淨買賣（張）", color="方向",
+                         color_discrete_map=BUYSELL_COLORS,
+                         category_orders={"方向": ["買超", "賣超", "持平"]},
+                         title="外資每日買賣超（紅＝買超 / 綠＝賣超）")
+            fig.update_layout(xaxis_title="日期")
             st.plotly_chart(fig, width="stretch")
-            with st.expander("看每日明細（柱狀）"):
-                figd = px.bar(keep, x="date", y="淨買賣（張）", color="法人",
-                              color_discrete_map=color_map, barmode="group",
-                              title="每日淨買賣（外資 vs 投信）")
-                figd.update_layout(xaxis_title="日期")
-                st.plotly_chart(figd, width="stretch")
+
+            # 累積淨買賣 線圖（看趨勢方向）
+            keep_sorted = keep.sort_values("date").copy()
+            keep_sorted["累積淨買賣（張）"] = keep_sorted.groupby("法人")["淨買賣（張）"].cumsum()
+            figc = px.line(keep_sorted, x="date", y="累積淨買賣（張）", color="法人",
+                           markers=True,
+                           color_discrete_map={"外資": UP_RED, "投信": "#1f77b4"},
+                           title="三大法人累積淨買賣趨勢（線往上＝持續買超）")
+            figc.add_hline(y=0, line_dash="dot", line_color=NEUTRAL_GRAY)
+            figc.update_layout(xaxis_title="日期")
+            st.plotly_chart(figc, width="stretch")
+
+        # 融資融券餘額 線圖
+        ms = _margin_short(sid)
+        if ms is not None and not ms.empty:
+            st.divider()
+            st.markdown("#### 💳 融資融券餘額趨勢",
+                        help="融資餘額升＝散戶借錢做多增加（過高常是潛在賣壓）；融券餘額升＝放空力道增加。")
+            figm = go.Figure()
+            figm.add_trace(go.Scatter(
+                x=ms["date"], y=ms["融資餘額"], name="融資餘額（左軸）",
+                mode="lines+markers", line=dict(color=UP_RED, width=2),
+                hovertemplate="融資 %{y:,.0f} 張<extra></extra>"))
+            figm.add_trace(go.Scatter(
+                x=ms["date"], y=ms["融券餘額"], name="融券餘額（右軸）",
+                mode="lines+markers", line=dict(color=DOWN_GREEN, width=2), yaxis="y2",
+                hovertemplate="融券 %{y:,.0f} 張<extra></extra>"))
+            figm.update_layout(
+                title="融資（紅，左軸）vs 融券（綠，右軸）餘額（張）",
+                xaxis_title="日期",
+                yaxis=dict(title="融資餘額（張）"),
+                yaxis2=dict(title="融券餘額（張）", overlaying="y", side="right",
+                            showgrid=False),
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(figm, width="stretch")
     else:
         st.warning(f"籌碼資料讀取問題：{chips.get('error') if isinstance(chips, dict) else chips}")
 
@@ -534,22 +652,28 @@ with tab_fund:
             st.plotly_chart(fig, width="stretch")
         st.divider()
         col1, col2 = st.columns(2)
-        rev_all = fund.get("revenue_yoy_all") or fund.get("revenue_yoy_recent") or []
-        col1.markdown("##### 月營收年增率 YoY（%）")
-        _html_yoy = _hist_trend_table(rev_all, "month", "yoy_pct", unit="%", fmt="{:.1f}", n_show=6)
-        if _html_yoy:
-            col1.markdown(_html_yoy, unsafe_allow_html=True)
-            col1.caption("▲上升紅、▼下降綠（台股慣例）；歷史排名＝在近 4 年同項目中的高低位。")
-        else:
-            col1.info("無月營收年增資料。")
-        eps_all = fund.get("eps_all") or fund.get("eps_recent") or []
-        col2.markdown("##### 近四季每股盈餘 EPS（元）")
-        _html_eps = _hist_trend_table(eps_all, "q", "eps", unit="", fmt="{:.2f}", n_show=4)
-        if _html_eps:
-            col2.markdown(_html_eps, unsafe_allow_html=True)
-            col2.caption("▲上升紅、▼下降綠（台股慣例）；歷史排名＝在近 4 年各季 EPS 中的高低位。")
-        else:
-            col2.info("無 EPS 資料。")
+        rev = fund.get("revenue_yoy_recent") or []
+        with col1:
+            st.markdown("**📅 月營收年增率 YoY（%）**")
+            if rev:
+                rdf = pd.DataFrame(rev).rename(columns={"month": "月份", "yoy_pct": "YoY %"})
+                sty = (rdf.style
+                       .map(_pos_red_neg_green, subset=["YoY %"])
+                       .format({"YoY %": "{:+.1f}"}))
+                st.dataframe(sty, hide_index=True, width="stretch")
+            else:
+                st.caption("無月營收年增率資料。")
+        eps = fund.get("eps_recent") or []
+        with col2:
+            st.markdown("**💰 近四季每股盈餘 EPS（元）**")
+            if eps:
+                edf = pd.DataFrame(eps).rename(columns={"q": "財報季", "eps": "EPS"})
+                sty = (edf.style
+                       .map(_pos_red_neg_green, subset=["EPS"])
+                       .format({"EPS": "{:.2f}"}))
+                st.dataframe(sty, hide_index=True, width="stretch")
+            else:
+                st.caption("無 EPS 資料。")
 
         # 法說會 guidance（公司財測，從新聞擷取）
         st.divider()
@@ -572,6 +696,17 @@ with tab_fund:
 
 # --- 估值 ------------------------------------------------------------------
 with tab_val:
+    # 🆕 多維度企業估值（孫慶龍8步驟預估EPS × P/E雙基準 + PEG + P/CF + 投顧反推）
+    _cur_px = price.get("close") if isinstance(price, dict) else None
+    vdisp.show_sun_forecast(sid)
+    st.divider()
+    try:
+        vdisp.show_multidim_valuation(sid, _cur_px)
+    except Exception as _e:
+        st.error(f"多維度估值計算發生問題：{_e}")
+    st.divider()
+    st.markdown("## 📦 原有估值指標（籌碼/技術/河流圖/分析師目標價）")
+
     if isinstance(val, dict) and "error" not in val:
         a, b, c, d = st.columns(4)
         _metric(a, "本益比 PER", val.get("per"), help_=HELP["per"])
@@ -602,9 +737,9 @@ with tab_val:
         bdf = band.get("df")
         if isinstance(bdf, pd.DataFrame) and not bdf.empty:
             mults = band["multiples"]
-            # 由低到高：綠(便宜) -> 紅(貴)
-            shades = ["rgba(38,166,91,0.18)", "rgba(135,196,64,0.18)", "rgba(247,202,24,0.18)",
-                      "rgba(230,126,34,0.18)", "rgba(231,76,60,0.18)"]
+            # 由低到高：紅(便宜) -> 綠(貴)（台股慣例：便宜該買=紅、昂貴=綠）
+            shades = ["rgba(231,76,60,0.18)", "rgba(230,126,34,0.18)", "rgba(247,202,24,0.18)",
+                      "rgba(135,196,64,0.18)", "rgba(38,166,91,0.18)"]
             fig = go.Figure()
             for i, m in enumerate(mults):
                 fig.add_trace(go.Scatter(
@@ -625,74 +760,6 @@ with tab_val:
             st.caption(f"PER 帶倍數（取近三年歷史百分位）：{mults}　｜　目前 PER {band.get('current_per')} 倍")
         else:
             st.info("此檔資料不足以繪製本益比河流圖（可能 EPS 為負或歷史太短）。")
-
-        # 📈 EPS 推估器 / 股價推估（本益比評價法）
-        st.divider()
-        st.markdown("#### 📈 EPS 推估器（拉桿試算股價）",
-                    help="以近四季實際財務為基準，調整『預估營收成長』與『預估毛利率』推估 forward EPS，再乘上歷史本益比區間得到合理股價。毛利率低的公司(如鴻海)槓桿很大。")
-        f = _eps_fund(sid)
-        if f and f.get("shares"):
-            cur_gm = round(f["gross_margin"] * 100, 2)
-            sens = eps_model.eps_sensitivity_to_margin(f)
-            st.caption(f"基準（近四季）：營收 {f['rev']/1e8:,.0f} 億、毛利率 {cur_gm}%、稅率 {f['tax_rate']*100:.1f}%、歸母佔比 {f['parent_ratio']*100:.1f}%、股數 {f['shares']/1e8:.1f} 億　｜　**槓桿：毛利率每 +1pp ≈ EPS {sens:+.2f} 元**")
-
-            gv = _guidance(sid)
-            g_growth = gv.get("營收成長%") if gv else None
-            g_gm = gv.get("毛利率%") if gv else None
-            c1, c2 = st.columns(2)
-            rev_g = c1.slider("預估營收成長 (%)", -20.0, 80.0,
-                              float(g_growth) if g_growth else 0.0, 1.0)
-            gm = c2.slider("預估毛利率 (%)", max(1.0, cur_gm - 4), cur_gm + 8,
-                           float(g_gm) if g_gm else cur_gm, 0.1)
-
-            # 毛利率新聞參考（給拉桿一個依據）
-            gmn = _gm_news(sid)
-            with st.expander("📰 新聞提到的毛利率（設定拉桿前可參考）"):
-                got_num = [r for r in gmn if r["毛利率%"] != "—"]
-                if got_num:
-                    for r in got_num[:6]:
-                        st.markdown(f"- `{r['date']}` **{r['毛利率%']}%** ｜ {r['title'][:54]}")
-                    st.caption("⚠️ 數字可能是同篇提到的其他個股，請看標題確認。")
-                else:
-                    st.info(f"新聞標題沒抓到 {(_name(sid) or sid)} 的明確毛利率數字——這類預估多在法說/券商報告內文，免費標題撈不到（需 Gemini 讀內文或看凱基研報）。")
-                if gmn:
-                    st.caption("毛利率相關新聞：" + "；".join(r["title"][:22] for r in gmn[:4]))
-
-            # PER 倍數設定（答 Q1：可調年數，或自訂）
-            st.markdown("**本益比(PER)倍數設定**")
-            p1, p2 = st.columns([1, 2])
-            yrs = p1.selectbox("歷史取樣年數", [1, 2, 3, 5], index=2,
-                               help="PER 低/中/高 = 該期間每日 PER 的 20/50/80 百分位。再評等中的股票(如鴻海)可選短年數或改自訂。")
-            band = _pe_band3(sid, yrs)
-            hist_mults = band.get("multiples") or []
-            manual = p2.checkbox("自訂 PER（覆蓋歷史）", help="若你認為產業/題材讓它該享有不同評價，可手動輸入")
-            if manual or len(hist_mults) < 3:
-                base_lo = hist_mults[0] if len(hist_mults) >= 3 else 10.0
-                base_mid = hist_mults[1] if len(hist_mults) >= 3 else 15.0
-                base_hi = hist_mults[2] if len(hist_mults) >= 3 else 20.0
-                q1, q2, q3 = st.columns(3)
-                lo = q1.number_input("低 PER", 1.0, 100.0, float(round(base_lo, 1)), 0.5)
-                mid = q2.number_input("中 PER", 1.0, 100.0, float(round(base_mid, 1)), 0.5)
-                hi = q3.number_input("高 PER", 1.0, 100.0, float(round(base_hi, 1)), 0.5)
-                mults = [lo, mid, hi]
-                src = "自訂"
-            else:
-                mults = hist_mults
-                src = f"近{yrs}年歷史百分位(20/50/80)"
-
-            eps_fwd = eps_model.project_eps(f, rev_g, gm)
-            cur_price = price.get("close") if isinstance(price, dict) else None
-            labels = ["便宜(PER低)", "合理(PER中)", "昂貴(PER高)"]
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("推估 EPS", f"{eps_fwd:.2f}", f"{eps_fwd - f['eps_ttm']:+.2f} vs TTM")
-            for lab, mlt, col in zip(labels, mults, (m2, m3, m4)):
-                tp = eps_fwd * mlt
-                up = (tp / cur_price - 1) * 100 if cur_price else None
-                col.metric(f"{lab} ×{mlt}", f"{tp:,.0f}",
-                           f"{up:+.1f}%" if up is not None else None, delta_color="inverse")
-            st.caption(f"推估 EPS {eps_fwd:.2f} × PER {mults}（{src}）　｜　現價 {cur_price}　｜　目前 PER {band.get('current_per')}（漲跌幅%為台股紅漲綠跌）")
-        else:
-            st.info("此檔資料不足以推估 EPS（可能缺財報、股本或 EPS 為負）。")
 
         # 分析師目標價（從新聞擷取，best-effort）
         st.divider()
@@ -774,6 +841,18 @@ with tab_industry:
     info = fm.stock_info(sid)
     cats = sorted(set(info["industry_category"].dropna())) if not info.empty else []
     st.markdown(f"**產業分類：** {('、'.join(cats)) if cats else '—'}")
+
+    # 🏢 這間公司在做什麼（Gemini 自動生成，快取一天）
+    if gem.is_configured():
+        prof = _company_profile(sid)
+        if prof:
+            st.markdown("#### 🏢 這間公司在做什麼")
+            st.info(prof)
+            st.caption("※ 由 AI 依公開資訊生成，數字/占比請再核對，僅供建立公司輪廓。")
+    else:
+        st.caption("🏢 想看『這間公司在做什麼』的白話簡介？在 `.env` 填 `GEMINI_KEY` 並重啟即可自動生成。")
+
+    st.divider()
     view = None
     for c in cats:
         view = industry_mod.get_industry_view(c) or view
