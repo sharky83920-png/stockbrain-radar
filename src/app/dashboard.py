@@ -18,6 +18,7 @@ from src.analysis import eps_model
 from src.analysis import guidance as guidance_mod
 from src.analysis import industry as industry_mod
 from src.analysis import news_digest
+from src.analysis import technical as tech_mod
 from src.analysis.valuation import pe_band
 from src.app import valuation_display as vdisp
 from src.utils import read_reports
@@ -145,6 +146,11 @@ def _news(sid: str):
 @st.cache_data(ttl=3600)
 def _eps_fund(sid: str):
     return eps_model.fundamentals_ttm(sid)
+
+
+@st.cache_data(ttl=3600)
+def _atr(sid: str):
+    return tech_mod.calc_atr(sid)
 
 
 @st.cache_data(ttl=3600)
@@ -469,8 +475,8 @@ if _wl:
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
 
-tab_chip, tab_fund, tab_val, tab_news, tab_report, tab_industry, tab_debate, tab_map = st.tabs(
-    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論", "🗺️ 市場地圖"]
+tab_chip, tab_fund, tab_val, tab_tech, tab_news, tab_report, tab_industry, tab_debate, tab_map = st.tabs(
+    ["🎯 籌碼面", "📊 基本面", "💰 估值", "📐 技術面", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論", "🗺️ 市場地圖"]
 )
 
 # --- 🧠 請專家們討論 --------------------------------------------------------
@@ -784,6 +790,80 @@ with tab_val:
                     "此功能靠新聞擷取，量取決於新聞多寡——填 FinMind token 後新聞變多會更有料。")
     else:
         st.warning(f"估值資料讀取問題：{val.get('error') if isinstance(val, dict) else val}")
+
+# --- 技術面 ----------------------------------------------------------------
+with tab_tech:
+    st.markdown("#### 📐 技術面指標")
+    st.caption("ATR（Average True Range，平均真實波幅）衡量近 14 個交易日的市場波動度，用於科學設置止損點位。計算方法與 TradingView 一致（Wilder's RMA）。")
+
+    atr_data = _atr(sid)
+    if atr_data.get("error"):
+        st.error(f"ATR 計算失敗：{atr_data['error']}")
+    else:
+        atr_val = atr_data["atr"]
+        close_val = atr_data["close"]
+
+        # --- 核心數值 ---
+        st.markdown("##### 📏 ATR 止損參考（14日 Wilder's RMA）")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "ATR（14日）",
+            f"{atr_val} 元",
+            help="近 14 個交易日真實波幅的 Wilder 平滑平均值。代表市場『正常波動』的範圍，止損不應設在這個範圍內，否則容易被正常震盪洗出場。",
+        )
+        c2.metric(
+            "止損帶 1× ATR",
+            f"{atr_data['stop_1x']} 元",
+            help=f"收盤 {close_val} − 1×ATR {atr_val} = {atr_data['stop_1x']}　｜　適合波動小、趨勢明確時使用，止損較緊。",
+        )
+        c3.metric(
+            "止損帶 1.5× ATR",
+            f"{atr_data['stop_15x']} 元",
+            help=f"收盤 {close_val} − 1.5×ATR = {atr_data['stop_15x']}　｜　最常用的倍數，兼顧空間與風險控制。",
+        )
+        c4.metric(
+            "止損帶 2× ATR",
+            f"{atr_data['stop_2x']} 元",
+            help=f"收盤 {close_val} − 2×ATR = {atr_data['stop_2x']}　｜　波動大、行情不確定時給更多生存空間。",
+        )
+        st.caption(
+            f"資料日：{atr_data['date']}　｜　收盤：{close_val} 元　｜　"
+            "⚠️ 止損點僅供計算參考，請配合支撐位/壓力位綜合判斷。"
+        )
+
+        st.info(
+            f"📖 **使用方法**：若你在 **{close_val}** 元附近進場做多，"
+            f"可將止損設在支撐位之下約 **1~2 倍 ATR**（{atr_data['stop_1x']}～{atr_data['stop_2x']} 元），"
+            f"讓價格有足夠空間應對正常波動，避免被無效洗盤掃出場。"
+        )
+
+        # --- ATR 歷史趨勢線 ---
+        series = atr_data.get("series", [])
+        if len(series) >= 5:
+            st.divider()
+            st.markdown("##### 📈 ATR 近30日趨勢（波動度變化）")
+            sdf = pd.DataFrame(series)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=sdf["date"], y=sdf["atr"],
+                mode="lines+markers",
+                line=dict(color="#f39c12", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(243,156,18,0.12)",
+                hovertemplate="ATR: %{y:.2f} 元<extra></extra>",
+            ))
+            fig.update_layout(
+                xaxis_title="日期",
+                yaxis_title="ATR（元）",
+                hovermode="x unified",
+                height=280,
+            )
+            st.plotly_chart(fig, width="stretch")
+            st.caption("ATR 值上升＝市場波動加劇（可能在大行情中），下降＝盤整或波動縮小。")
+
+    st.divider()
+    st.caption("📌 Phase 3 SOP 評分紅綠燈（技術面部分）將在此分頁擴充，目前先展示 ATR 止損工具。")
+
 
 # --- 相關新聞 --------------------------------------------------------------
 with tab_news:
