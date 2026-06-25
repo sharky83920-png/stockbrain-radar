@@ -75,7 +75,14 @@ def _snapshot(sid: str):
 
 @st.cache_data(ttl=3600)
 def _inst(sid: str):
-    return fm.institutional_investors(sid, days=45).sort_values("date")
+    # FinMind 額度用罄會回 402；失敗回空表，呼叫端 `if not inst.empty` 會自然略過。
+    try:
+        df = fm.institutional_investors(sid, days=45)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    return df.sort_values("date")
 
 
 @st.cache_data(ttl=3600)
@@ -85,8 +92,15 @@ def _pe_band(sid: str):
 
 @st.cache_data(ttl=3600)
 def _margin_short(sid: str):
-    """融資融券餘額時序（張）：融資=MarginPurchaseTodayBalance、融券=ShortSaleTodayBalance。"""
-    df = fm.margin_short(sid, days=90)
+    """融資融券餘額時序（張）：融資=MarginPurchaseTodayBalance、融券=ShortSaleTodayBalance。
+
+    FinMind 此資料集在匿名/額度用罄時會回 402；單一次要數據失敗不該炸掉整個分頁，
+    遇任何錯誤回 None，呼叫端會優雅略過。
+    """
+    try:
+        df = fm.margin_short(sid, days=90)
+    except Exception:
+        return None
     if df is None or df.empty:
         return df
     df = df.sort_values("date").copy()
@@ -474,6 +488,36 @@ if _wl:
                          hide_index=True, width="stretch")
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
+
+# --- 📅 近期重要事件 橫幅（前瞻事件行事曆）----------------------------------
+@st.cache_data(ttl=3600)
+def _upcoming_events():
+    from src.data import macro_data as _md
+    try:
+        return _md.upcoming_events()
+    except Exception:
+        return []
+
+
+_events = _upcoming_events()
+if _events:
+    with st.container(border=True):
+        st.markdown("📅 **近期重要事件**")
+        near = _events[:5]
+        for col, e in zip(st.columns(len(near)), near):
+            soon = e["days"] <= 10  # 10 天內用橘色（避開紅漲綠跌語意）
+            color = "color:#BA7517;" if soon else ""
+            col.markdown(
+                f"<div style='font-size:22px;line-height:1.1'>"
+                f"<span style='{color}font-weight:600'>{e['days']}</span>"
+                f"<span style='font-size:12px'> 天後</span></div>"
+                f"<div style='font-size:13px;margin-top:4px'>{e['name']}</div>"
+                f"<div style='font-size:11px;opacity:0.6'>{e['date'][5:]} · {e['market']}</div>",
+                unsafe_allow_html=True)
+        if len(_events) > 5:
+            rest = "　".join(f"{e['name']} {e['date'][5:]}" for e in _events[5:])
+            st.caption(f"更多：{rest}")
+        st.caption("橘色＝10 天內　·　日期為系統推算，FOMC 依官方公布表")
 
 tab_chip, tab_fund, tab_val, tab_tech, tab_news, tab_report, tab_industry, tab_debate, tab_map = st.tabs(
     ["🎯 籌碼面", "📊 基本面", "💰 估值", "📐 技術面", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論", "🗺️ 市場地圖"]
@@ -922,8 +966,12 @@ with tab_report:
 
 # --- 產業 / 供應鏈 ---------------------------------------------------------
 with tab_industry:
-    info = fm.stock_info(sid)
-    cats = sorted(set(info["industry_category"].dropna())) if not info.empty else []
+    try:
+        info = fm.stock_info(sid)
+    except Exception:
+        info = None
+    cats = (sorted(set(info["industry_category"].dropna()))
+            if info is not None and not info.empty else [])
     st.markdown(f"**產業分類：** {('、'.join(cats)) if cats else '—'}")
 
     # 🏢 這間公司在做什麼（Gemini 自動生成，快取一天）

@@ -101,6 +101,8 @@ def yield_curve(mkt: list[dict]) -> str:
 # (FRED series_id, 顯示名, units 轉換)　units=pc1 → 與去年同月相比的年增率(%)
 _FRED = [
     ("CPIAUCSL", "美國CPI年增率(%)", "pc1"),
+    ("PAYEMS", "美國非農就業月增(千人)", "chg"),  # chg=與上月相比的新增就業人數
+    ("UNRATE", "美國失業率(%)", None),
     ("DFF", "美國聯邦基金利率(%)", None),
     ("DGS10", "美國10年期公債殖利率(%)", None),
 ]
@@ -234,22 +236,86 @@ def nvda_earnings() -> str | None:
     return None
 
 
+# 2026 年 FOMC 會議日（聯準會官方公布，每次兩天會議取第一天）。來源：federalreserve.gov
+_FOMC_2026 = [
+    date(2026, 1, 27), date(2026, 3, 17), date(2026, 4, 28), date(2026, 6, 16),
+    date(2026, 7, 28), date(2026, 9, 15), date(2026, 10, 27), date(2026, 12, 8),
+]
+
+
+def _next_first_friday(today: date) -> date:
+    """美國非農就業：每月第一個週五公布（BLS 慣例，少數月份微調）。回下一個（含今天）。"""
+    def ff(y: int, m: int) -> date:
+        d = date(y, m, 1)
+        return d + timedelta(days=(4 - d.weekday()) % 7)  # 週五=4
+    f = ff(today.year, today.month)
+    if f < today:
+        y, m = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+        f = ff(y, m)
+    return f
+
+
+def _next_monthly(today: date, day: int) -> date:
+    """下一個『每月第 day 日』（含今天）。"""
+    d = date(today.year, today.month, day)
+    if d < today:
+        y, m = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+        d = date(y, m, day)
+    return d
+
+
+def _next_fin_deadline(today: date) -> date:
+    """台股財報公布截止：Q1=5/15、Q2=8/14、Q3=11/14、年報=隔年3/31。回下一個（含今天）。"""
+    cand = [date(today.year, 5, 15), date(today.year, 8, 14),
+            date(today.year, 11, 14), date(today.year + 1, 3, 31)]
+    future = [d for d in cand if d >= today]
+    return min(future) if future else date(today.year + 1, 5, 15)
+
+
+def _next_fomc(today: date) -> date | None:
+    future = [d for d in _FOMC_2026 if d >= today]
+    return min(future) if future else None
+
+
+def upcoming_events() -> list[dict]:
+    """前瞻事件清單（結構化），給 Dashboard 橫幅 / Telegram / 辯論共用。依日期排序。
+    每筆：{date, days, name, market, hint}。"""
+    today = date.today()
+    evs: list[dict] = []
+
+    def add(d: date | None, name: str, market: str, hint: str) -> None:
+        if d and d >= today:
+            evs.append({"date": d.isoformat(), "days": (d - today).days,
+                        "name": name, "market": market, "hint": hint})
+
+    add(_next_settlement(today), "台指期結算日", "台股", "慎防結算壓盤行情")
+    add(_next_first_friday(today), "美國非農就業數據", "美股", "就業強弱牽動 Fed 降息預期")
+    add(_next_fomc(today), "FOMC 利率決議會議", "美股", "聯準會利率決議（兩天會議首日）")
+    add(_next_monthly(today, 10), "上月營收公布截止", "台股", "月營收是產業動能領先指標")
+    add(_next_fin_deadline(today), "季財報公布截止", "台股", "財報季營運能見度驗收")
+
+    cpi = cpi_next_release()
+    if cpi and cpi >= today.isoformat():
+        add(date.fromisoformat(cpi), "美國 CPI 公布", "美股", "通膨數據，牽動利率路徑")
+
+    nv = nvda_earnings()
+    if nv:
+        try:
+            add(date.fromisoformat(str(nv)[:10]), "輝達(NVDA)財報", "美股",
+                "AI 需求風向，牽動台積電供應鏈")
+        except Exception:
+            pass
+
+    evs.sort(key=lambda e: e["date"])
+    return evs
+
+
 def calendar_events() -> list[str]:
     return _cached("calendar", _calendar_events_impl)
 
 
 def _calendar_events_impl() -> list[str]:
-    out: list[str] = []
-    today = date.today()
-    s = _next_settlement(today)
-    out.append(f"台指期結算日：{s.isoformat()}（{(s - today).days} 天後）")
-    cpi = cpi_next_release()
-    if cpi:
-        out.append(f"美國CPI下次公布：{cpi}")
-    nv = nvda_earnings()
-    if nv:
-        out.append(f"輝達下次財報：{nv}")
-    return out
+    return [f"{e['name']}：{e['date']}（{e['days']} 天後）" for e in upcoming_events()]
 
 
 def summary_lines() -> str:
