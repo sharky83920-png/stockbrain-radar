@@ -40,9 +40,11 @@ def generate(prompt: str, timeout: int = 90) -> str:
     url = ENDPOINT.format(model=_model())
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
+    # 金鑰放 header，不放 URL query：避免 HTTPError 訊息把 ?key=... 整串金鑰印出來
+    headers = {"x-goog-api-key": key}
     for attempt in range(3):
-        resp = requests.post(url, params={"key": key}, json=payload, timeout=timeout, verify=False)
-        if resp.status_code == 429:
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout, verify=False)
+        if resp.status_code in (429, 500, 502, 503, 504):  # 暫時性錯誤都重試（含 503）
             wait = 30 * (attempt + 1)   # 30s / 60s / 90s
             time.sleep(wait)
             continue
@@ -53,7 +55,7 @@ def generate(prompt: str, timeout: int = 90) -> str:
         except (KeyError, IndexError) as e:
             raise RuntimeError(f"Gemini 回應格式非預期：{data}") from e
 
-    raise RuntimeError("Gemini 429 Too Many Requests，已重試 3 次仍失敗，請稍後再試")
+    raise RuntimeError("Gemini 連續暫時性錯誤(429/5xx)，已重試 3 次仍失敗，請稍後再試")
 
 
 def summarize_news(titles: list[str], stock_id: str) -> str:

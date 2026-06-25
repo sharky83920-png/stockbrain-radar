@@ -29,6 +29,25 @@ def kb_dir() -> Path:
     return Path(os.environ.get("STOCKBRAIN_KB_DIR", _DEFAULT_KB))
 
 
+# 投顧報告歸檔處（待閱讀區 reader 寫入的 stockbrain vault 知識庫）。
+# 與辯論腦的 kb_dir()（脈絡/紀律/討論存檔）刻意分離：腦的「人格」在 secondbrain，
+# 「情報」在 stockbrain。load_knowledge() 會同時讀兩處，避免腦讀不到使用者歸檔的報告。
+def reports_kb_dir() -> Path:
+    base = os.environ.get("RADAR_VAULT_DIR", r"G:\我的雲端硬碟\stockbrain")
+    return Path(base) / "知識庫"
+
+
+def _stock_folder(root: Path, sid: str) -> Path | None:
+    """在 <root>/個股 下找命名為 <代號>_<名稱> 的資料夾（用代號前綴比對）。查不到回 None。"""
+    stocks_root = root / "個股"
+    if not stocks_root.exists():
+        return None
+    for d in stocks_root.iterdir():
+        if d.is_dir() and d.name.split("_")[0] == sid:
+            return d
+    return None
+
+
 def _read_md_under(folder: Path, limit_chars: int = 4000) -> str:
     """把資料夾下所有 .md/.txt 內容串起來（best-effort，控制長度）。"""
     if not folder.exists():
@@ -87,17 +106,25 @@ def load_expert_kb_folder(folder: str, limit: int = 4500) -> str:
 
 
 def load_knowledge(sid: str) -> dict[str, str]:
-    """讀使用者脈絡 + 該股的投顧報告/筆記。回 {'context':..,'stock':..}。"""
-    base = kb_dir()
-    context = _read_md_under(base / "00_我的脈絡", limit_chars=3000)
-    # 個股資料夾命名為 <代號>_<名稱>，用代號前綴比對
-    stock_txt = ""
-    stocks_root = base / "個股"
-    if stocks_root.exists():
-        for d in stocks_root.iterdir():
-            if d.is_dir() and d.name.split("_")[0] == sid:
-                stock_txt = _read_md_under(d, limit_chars=3000)
-                break
+    """讀使用者脈絡 + 該股的投顧報告/筆記。回 {'context':..,'stock':..}。
+
+    個股報告同時掃兩個 vault：
+      1. 腦本身的 kb_dir()/個股（secondbrain，少數舊資料）
+      2. reports_kb_dir()/個股（stockbrain，待閱讀區 reader 歸檔的投顧報告，多數在這）
+    兩處都有就合併，確保腦讀得到使用者實際歸檔的報告。
+    """
+    context = _read_md_under(kb_dir() / "00_我的脈絡", limit_chars=3000)
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for root in (kb_dir(), reports_kb_dir()):
+        folder = _stock_folder(root, sid)
+        if folder is None or str(folder) in seen:
+            continue
+        seen.add(str(folder))
+        t = _read_md_under(folder, limit_chars=3000)
+        if t:
+            chunks.append(t)
+    stock_txt = "\n\n".join(chunks)[:5000]
     return {"context": context, "stock": stock_txt}
 
 
@@ -182,7 +209,7 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
     lines = [
         f"標的：{name}({sid})　資料日 {p.get('date', '—')}",
         f"收盤 {p.get('close')}（漲跌 {p.get('change_pct')}%）",
-        f"估值：PER {v.get('per')}｜PBR {v.get('pbr')}｜PEG {v.get('peg')}｜殖利率 {v.get('dividend_yield_pct')}%",
+        f"估值：PER(近四季EPS) {v.get('per')}｜PBR {v.get('pbr')}｜PEG {v.get('peg')}｜殖利率 {v.get('dividend_yield_pct')}%",
         f"基本面：EPS(近四季) {f.get('eps_ttm')}｜ROE {f.get('roe_ttm_pct')}%｜毛利率 {f.get('gross_margin_pct')}%｜淨利率 {f.get('net_margin_pct')}%｜三率三升 {tr_txt}",
         f"籌碼：外資20日 {c.get('foreign_net_20d_lots')} 張｜投信20日 {c.get('trust_net_20d_lots')} 張｜外資持股 {c.get('foreign_holding_pct')}%",
     ]
@@ -194,6 +221,16 @@ def data_brief(name: str, sid: str, snap: dict) -> str:
         fc = fundamental_forecast.compute(sid)
         fc_txt = fundamental_forecast.summary(sid, name, fc)
         lines.append(fc_txt)
+        # 統一本益比口徑：現價 ÷ 預估EPS = forward PER，避免專家各拿近四季/預估EPS 報出不同倍數
+        est_eps = fc.get("est_eps") if isinstance(fc, dict) else None
+        close = p.get("close")
+        if est_eps and close and est_eps > 0:
+            fwd_per = round(float(close) / float(est_eps), 1)
+            lines.append(
+                f"【本益比口徑統一】近四季PER {v.get('per')}（已實現EPS）vs "
+                f"forward PER {fwd_per}（現價{close}÷預估EPS{est_eps}）。"
+                f"成長股請以 forward PER 為主、勿與近四季混用報數。"
+            )
     except Exception:
         pass
     return "\n".join(lines)
@@ -461,10 +498,16 @@ def _news_demo(f: dict) -> str:
     return "\n".join(lines)
 
 
-def _news_gemini(f: dict, name: str) -> str:
+def _news_gemini(f: dict, name: str, price_hint: str = "") -> str:
     today = date.today().isoformat()
     recent = "\n".join(f"- {i['date']} {i['title']}（{i['source']}）" for i in f["recent"]) or "（近期無明顯新聞）"
     analyst = "\n".join(f"- {i['date']} {i['title']}" for i in f["analyst"]) or "（近期無明確目標價/評等報導）"
+    price_block = (
+        f"⚠️ 現價校正（權威數值，以此為準）：{price_hint}。"
+        f"新聞標題若出現與此明顯不符的股價（如喊漲停/某價位/某漲幅），多半是過期或別日報導，"
+        f"請以上述現價為準、別照抄標題的股價數字。\n\n"
+        if price_hint else ""
+    )
     prompt = (
         f"你是專家討論的「消息面專家」，負責開場後第一個提供情報。**今天是 {today}**，"
         f"以最新日期的報導為準；標題若說『待公布／即將』但日期已過，視為已發生、別照抄過期說法。"
@@ -472,6 +515,7 @@ def _news_gemini(f: dict, name: str) -> str:
         f"請用繁體中文整理成消息面重點：①最新利多、利空各抓 1-2 點 ②投顧目標價或評等動向 "
         f"③有沒有可能改變基本面或籌碼判斷的大事，提醒後面的專家注意。"
         f"嚴禁杜撰，只能根據標題；標題沒提到的不要腦補。整體 3-5 句、條列清楚。\n\n"
+        f"{price_block}"
         f"=== 最新新聞 ===\n{recent}\n\n=== 投顧/目標價 ===\n{analyst}"
     )
     return gem.generate(prompt)
@@ -644,7 +688,10 @@ def run_debate(sid: str, name: str, snap: dict, brain: str = "demo",
         k = expert["key"]
         try:
             if k == "news":
-                text = _news_gemini(news_f, name) if brain == "gemini" else _news_demo(news_f)
+                _pp = snap.get("price", {}) or {}
+                _ph = (f"目前收盤 {_pp.get('close')}（漲跌 {_pp.get('change_pct')}%，資料日 {_pp.get('date')}）"
+                       if _pp.get("close") is not None else "")
+                text = _news_gemini(news_f, name, _ph) if brain == "gemini" else _news_demo(news_f)
             elif k == "macro":
                 text = _macro_gemini(macro_f, name, macro_hard) if brain == "gemini" else _macro_demo(macro_f, macro_hard)
             elif k == "forecast":
