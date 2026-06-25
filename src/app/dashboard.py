@@ -491,7 +491,7 @@ if _wl:
 
 # --- 📅 近期重要事件 橫幅（前瞻事件行事曆）----------------------------------
 @st.cache_data(ttl=3600)
-def _upcoming_events():
+def _macro_events():
     from src.data import macro_data as _md
     try:
         return _md.upcoming_events()
@@ -499,7 +499,17 @@ def _upcoming_events():
         return []
 
 
-_events = _upcoming_events()
+@st.cache_data(ttl=3600)
+def _stock_specific_events(_sid: str):
+    from src.data import stock_events as _se
+    try:
+        return _se.upcoming(_sid)
+    except Exception:
+        return []
+
+
+# 大盤級總經事件 + 本檔專屬事件（法說會/財報日…），合併依日期排序
+_events = sorted(_macro_events() + _stock_specific_events(sid), key=lambda e: e["date"])
 if _events:
     with st.container(border=True):
         st.markdown("📅 **近期重要事件**")
@@ -511,7 +521,7 @@ if _events:
                 f"<div style='font-size:22px;line-height:1.1'>"
                 f"<span style='{color}font-weight:600'>{e['days']}</span>"
                 f"<span style='font-size:12px'> 天後</span></div>"
-                f"<div style='font-size:13px;margin-top:4px'>{e['name']}</div>"
+                f"<div style='font-size:13px;margin-top:4px'>{'🔹 ' if e['market']=='本檔' else ''}{e['name']}</div>"
                 f"<div style='font-size:11px;opacity:0.6'>{e['date'][5:]} · {e['market']}</div>",
                 unsafe_allow_html=True)
         if len(_events) > 5:
