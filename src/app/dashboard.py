@@ -167,6 +167,36 @@ def _atr(sid: str):
     return tech_mod.calc_atr(sid)
 
 
+def _resample_ohlc(df, rule):
+    """日K → 周/月K：開=首、高=最高、低=最低、收=末、量=加總。"""
+    g = df.set_index("date").resample(rule).agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "vol": "sum"}).dropna()
+    return g.reset_index()
+
+
+@st.cache_data(ttl=3600)
+def _kline(sid: str, period: str):
+    """K 線資料（含 MA5/10/20/60）。period: 日K/周K/月K。FinMind 失敗回空表。"""
+    days = {"日K": 170, "周K": 900, "月K": 2600}.get(period, 170)
+    try:
+        df = fm.stock_price(sid, days=days)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.sort_values("date").copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.rename(columns={"max": "high", "min": "low", "Trading_Volume": "vol"})
+    df = df[[c for c in ("date", "open", "high", "low", "close", "vol") if c in df.columns]]
+    if period == "周K":
+        df = _resample_ohlc(df, "W-FRI")
+    elif period == "月K":
+        df = _resample_ohlc(df, "ME")
+    for n in (5, 10, 20, 60):
+        df[f"MA{n}"] = df["close"].rolling(n).mean()
+    return df.tail(120).reset_index(drop=True)
+
+
 @st.cache_data(ttl=3600)
 def _pe_band3(sid: str, years: int = 3):
     from src.analysis.valuation import pe_band
@@ -849,6 +879,42 @@ with tab_val:
 # --- 技術面 ----------------------------------------------------------------
 with tab_tech:
     st.markdown("#### 📐 技術面指標")
+
+    # --- 🕯️ K 線圖（日K/周K/月K + 均線 + 量）---
+    st.markdown("##### 🕯️ K 線圖")
+    _period = st.radio("週期", ["日K", "周K", "月K"], horizontal=True,
+                       label_visibility="collapsed", key="kline_period")
+    _kdf = _kline(sid, _period)
+    if _kdf is None or _kdf.empty:
+        st.info("查無 K 線資料（可能 FinMind 額度或代號問題）。")
+    else:
+        from plotly.subplots import make_subplots
+        _RED, _GREEN = "#d62728", "#0a9e6e"  # 台股慣例：漲紅、跌綠
+        _xfmt = "%Y/%m" if _period == "月K" else "%Y/%m/%d"
+        _x = _kdf["date"].dt.strftime(_xfmt)  # 用字串當類別軸，去掉假日空隙
+        _ma_colors = {"MA5": "#ff9800", "MA10": "#2196f3", "MA20": "#9c27b0", "MA60": "#607d8b"}
+        kfig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                             row_heights=[0.76, 0.24])
+        kfig.add_trace(go.Candlestick(
+            x=_x, open=_kdf["open"], high=_kdf["high"], low=_kdf["low"], close=_kdf["close"],
+            name="K線", increasing_line_color=_RED, increasing_fillcolor=_RED,
+            decreasing_line_color=_GREEN, decreasing_fillcolor=_GREEN), row=1, col=1)
+        for _ma, _c in _ma_colors.items():
+            kfig.add_trace(go.Scatter(x=_x, y=_kdf[_ma], name=_ma, mode="lines",
+                                      line=dict(color=_c, width=1)), row=1, col=1)
+        _vcol = [_RED if c >= o else _GREEN for o, c in zip(_kdf["open"], _kdf["close"])]
+        kfig.add_trace(go.Bar(x=_x, y=_kdf["vol"], marker_color=_vcol, name="量",
+                              showlegend=False), row=2, col=1)
+        kfig.update_layout(height=540, hovermode="x unified", xaxis_rangeslider_visible=False,
+                           legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+                           margin=dict(t=28, b=8))
+        kfig.update_xaxes(type="category", nticks=12, row=2, col=1)
+        kfig.update_yaxes(title_text="價(元)", row=1, col=1)
+        kfig.update_yaxes(title_text="量(張)", row=2, col=1)
+        st.plotly_chart(kfig, width="stretch")
+        st.caption("均線：MA5(橘)/MA10(藍)/MA20(紫)/MA60(灰)　·　台股慣例：漲紅跌綠")
+    st.divider()
+
     st.caption("ATR（Average True Range，平均真實波幅）衡量近 14 個交易日的市場波動度，用於科學設置止損點位。計算方法與 TradingView 一致（Wilder's RMA）。")
 
     atr_data = _atr(sid)
