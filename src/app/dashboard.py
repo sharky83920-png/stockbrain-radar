@@ -500,10 +500,11 @@ def _macro_events():
 
 
 @st.cache_data(ttl=3600)
-def _stock_specific_events(_sid: str):
+def _stock_specific_events(sid: str):
+    # 注意：參數名不可用底線開頭，否則 st.cache_data 會忽略它、所有股票共用同一快取
     from src.data import stock_events as _se
     try:
-        return _se.upcoming(_sid)
+        return _se.upcoming(sid)
     except Exception:
         return []
 
