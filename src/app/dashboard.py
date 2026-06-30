@@ -526,7 +526,17 @@ if _wl:
         except Exception as e:  # noqa: BLE001
             st.caption(f"比較總表載入中或部分失敗：{e}")
 
-# --- 📅 近期重要事件 橫幅（前瞻事件行事曆）----------------------------------
+# --- 📅 近期重要事件 行事曆（上半大盤 / 下半本檔）------------------------------
+import datetime as _dt
+_WD = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+_SKIP_MACRO = {"上月營收公布截止", "季財報公布截止"}  # 移到下半「本檔」區，避免重複
+
+
+def _fmt_md_wd(iso: str):
+    d = _dt.date.fromisoformat(iso)
+    return f"{d.month:02d}/{d.day:02d}", _WD[d.weekday()]
+
+
 @st.cache_data(ttl=3600)
 def _macro_events():
     from src.data import macro_data as _md
@@ -546,26 +556,79 @@ def _stock_specific_events(sid: str):
         return []
 
 
-# 大盤級總經事件 + 本檔專屬事件（法說會/財報日…），合併依日期排序
-_events = sorted(_macro_events() + _stock_specific_events(sid), key=lambda e: e["date"])
-if _events:
-    with st.container(border=True):
-        st.markdown("📅 **近期重要事件**")
-        near = _events[:5]
+@st.cache_data(ttl=3600)
+def _stock_calendar(sid: str):
+    """本檔三大日期：月營收、季財報（法定截止，恆有）、法說會（公告才有，否則未公布）+ 其他個股事件。"""
+    from src.data import macro_data as _md
+    today = _dt.date.today()
+    rev = _md._next_monthly(today, 10)
+    rev_m = 12 if rev.month == 1 else rev.month - 1  # 10 日前公布的是上個月營收
+    fin = _md._next_fin_deadline(today)
+    q = {5: "Q1", 8: "Q2", 11: "Q3", 3: "年報"}.get(fin.month, "財報")
+    evs = _stock_specific_events(sid)
+    conf = next((e for e in evs if e["name"] == "法說會"), None)
+    return {
+        "rev": {"date": rev.isoformat(), "days": (rev - today).days,
+                "label": f"公布 {rev_m} 月營收", "sub": "每月 10 日前 · 月營收領先指標"},
+        "fin": {"date": fin.isoformat(), "days": (fin - today).days,
+                "label": f"公布 {q} 財報", "sub": "法定截止日 · 實際多提早"},
+        "conf": conf,
+        "extras": [e for e in evs if e["name"] != "法說會"],
+    }
+
+
+def _evt_row(label: str, sub: str, date_iso, days):
+    if date_iso:
+        mmdd, wd = _fmt_md_wd(date_iso)
+        daycolor = "color:#BA7517;" if (days is not None and days <= 10) else "opacity:0.55;"
+        right = (f"<div style='font-size:16px;font-weight:600'>{mmdd} "
+                 f"<span style='font-size:12px;font-weight:400;opacity:0.55'>{wd}</span></div>"
+                 f"<div style='font-size:11px;{daycolor}'>還有 {days} 天</div>")
+    else:
+        right = "<div style='font-size:14px;opacity:0.45'>未公布</div>"
+    st.markdown(
+        "<div style='display:flex;align-items:center;gap:12px;padding:5px 0'>"
+        f"<div style='flex:1'><div style='font-size:14px'>{label}</div>"
+        f"<div style='font-size:11px;opacity:0.55'>{sub}</div></div>"
+        f"<div style='text-align:right;min-width:84px'>{right}</div></div>",
+        unsafe_allow_html=True)
+
+
+_macro = sorted((e for e in _macro_events() if e["name"] not in _SKIP_MACRO),
+                key=lambda e: e["date"])
+_cal = _stock_calendar(sid)
+with st.container(border=True):
+    st.markdown("📅 **近期重要事件**")
+
+    # 上半：大盤 / 總經（日期為主）
+    st.caption("大盤 / 總經")
+    near = _macro[:5]
+    if near:
         for col, e in zip(st.columns(len(near)), near):
-            soon = e["days"] <= 10  # 10 天內用橘色（避開紅漲綠跌語意）
-            color = "color:#BA7517;" if soon else ""
+            mmdd, wd = _fmt_md_wd(e["date"])
+            daycolor = "color:#BA7517;" if e["days"] <= 10 else "opacity:0.55;"
             col.markdown(
-                f"<div style='font-size:22px;line-height:1.1'>"
-                f"<span style='{color}font-weight:600'>{e['days']}</span>"
-                f"<span style='font-size:12px'> 天後</span></div>"
-                f"<div style='font-size:13px;margin-top:4px'>{'🔹 ' if e['market']=='本檔' else ''}{e['name']}</div>"
-                f"<div style='font-size:11px;opacity:0.6'>{e['date'][5:]} · {e['market']}</div>",
+                f"<div style='font-size:22px;font-weight:600;line-height:1'>{mmdd}</div>"
+                f"<div style='font-size:11px;opacity:0.5;margin:2px 0 5px'>{wd}</div>"
+                f"<div style='font-size:13px;line-height:1.3'>{e['name']}</div>"
+                f"<div style='font-size:11px;{daycolor}margin-top:4px'>還有 {e['days']} 天</div>",
                 unsafe_allow_html=True)
-        if len(_events) > 5:
-            rest = "　".join(f"{e['name']} {e['date'][5:]}" for e in _events[5:])
-            st.caption(f"更多：{rest}")
-        st.caption("橘色＝10 天內　·　日期為系統推算，FOMC 依官方公布表")
+    if len(_macro) > 5:
+        rest = "　".join(f"{e['name']} {e['date'][5:]}" for e in _macro[5:])
+        st.caption(f"更多：{rest}")
+
+    # 下半：本檔個股（營收 / 財報 / 法說會 + 其他）
+    st.divider()
+    st.caption(f"本檔 · {_nm}({sid})" if _nm else f"本檔 · {sid}")
+    _evt_row(_cal["rev"]["label"], _cal["rev"]["sub"], _cal["rev"]["date"], _cal["rev"]["days"])
+    _evt_row(_cal["fin"]["label"], _cal["fin"]["sub"], _cal["fin"]["date"], _cal["fin"]["days"])
+    _conf = _cal["conf"]
+    _evt_row("法說會", _conf["hint"] if _conf else "尚未公告法說會日期",
+             _conf["date"] if _conf else None, _conf["days"] if _conf else None)
+    for e in _cal["extras"][:3]:
+        _evt_row(e["name"], e.get("hint", ""), e["date"], e["days"])
+
+    st.caption("橘色＝10 天內　·　法說會依公司公告，未公告顯示『未公布』；營收/財報為法定截止推算")
 
 tab_chip, tab_fund, tab_val, tab_tech, tab_news, tab_report, tab_industry, tab_debate, tab_map = st.tabs(
     ["🎯 籌碼面", "📊 基本面", "💰 估值", "📐 技術面", "📰 相關新聞", "📑 投顧動向", "🏭 產業/供應鏈", "🧠 請專家們討論", "🗺️ 市場地圖"]

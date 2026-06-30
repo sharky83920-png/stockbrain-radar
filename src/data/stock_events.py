@@ -3,8 +3,11 @@
 存成 vault JSON，跨機由 Google Drive 同步、Obsidian 可直接編。路徑可用環境變數
 RADAR_STOCK_EVENTS_PATH 覆寫，預設 G:\\我的雲端硬碟\\stockbrain\\工具欄\\個股事件.json。
 
-為何手動維護而非爬 MOPS：清單僅數檔、法說會/財報季頻一次，手動最穩、不會因 MOPS
-改版而壞。台積電這類大型股的年度法說會表早已公布，可一次填好。
+兩層設計（2026-06 起）：
+- 個股事件.json：**手動**維護，最穩、可一次釘死（如台積電年度法說會）。
+- 個股事件_auto.json：由 scripts/auto_events.py 從 TWSE OpenAPI **自動**抓
+  （法說會/股東會/除權息），每日排程更新。
+upcoming() 讀取時合併兩層，**同一 (date,type) 手動優先**；自動抓壞了不影響手動。
 
 JSON 格式（以股票代號為 key）：
 {
@@ -36,8 +39,13 @@ def _path() -> Path:
     return Path(os.environ.get("RADAR_STOCK_EVENTS_PATH", _DEFAULT_PATH))
 
 
-def _load_raw() -> dict:
-    p = _path()
+def _auto_path() -> Path:
+    return Path(os.environ.get(
+        "RADAR_STOCK_EVENTS_AUTO_PATH",
+        str(_path().parent / "個股事件_auto.json")))
+
+
+def _load_json(p: Path) -> dict:
     if not p.exists():
         return {}
     try:
@@ -47,15 +55,34 @@ def _load_raw() -> dict:
         return {}
 
 
+def _load_raw() -> dict:
+    return _load_json(_path())
+
+
+def _events_for(sid: str) -> list[dict]:
+    """合併手動 + 自動兩層；同一 (date,type) 手動優先。"""
+    sid = str(sid)
+    manual = [e for e in _load_raw().get(sid, []) if isinstance(e, dict)]
+    seen = {(e.get("date"), e.get("type")) for e in manual}
+    merged = list(manual)
+    for e in _load_json(_auto_path()).get(sid, []):
+        if not isinstance(e, dict):
+            continue
+        if (e.get("date"), e.get("type")) not in seen:
+            merged.append(e)
+    return merged
+
+
 def upcoming(sid: str, today: date | None = None) -> list[dict]:
     """回某股未來事件（含今天），依日期排序。
 
     每筆與 macro_data.upcoming_events() 同形：{date, days, name, market, hint}，
     market 固定為「本檔」，方便橫幅合併排序。
+    資料來源：手動 個股事件.json + 自動 個股事件_auto.json（手動優先）。
     """
     today = today or date.today()
     out: list[dict] = []
-    for e in _load_raw().get(str(sid), []):
+    for e in _events_for(sid):
         d = e.get("date")
         if not d or d < today.isoformat():
             continue
