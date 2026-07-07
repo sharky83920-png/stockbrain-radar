@@ -25,6 +25,12 @@ VALUATION_HELP = {
     "eps_forecast": "預估每股盈餘 EPS（Earnings Per Share）來自孫慶龍8步驟法：①今年累積營收年增率YoY "
                     "②去年全年營收 ③預估營收＝②×(1＋①) ④近四季母公司淨利率 ⑤預估淨利＝③×④ "
                     "⑥預估EPS＝⑤÷發行股數。這是『預估值』，與投顧預估可能不同。",
+    "pbr": "股價淨值比 PBR（Price/Book Ratio）= 每股股價 ÷ 每股淨值。葛拉漢愛用、保守型投資人偏好，"
+           "比盈餘更『具體』。缺點：土地/品牌/專利等無形資產多的公司帳面價值失真。"
+           "本系統用近3年每日 PBR 的 20/50/80 百分位 × 最新每股淨值，給便宜/合理/昂貴三檔價。",
+    "psr": "股價營收比 PSR（Price/Sales Ratio）= 每股股價 ÷ 每股營收（近12個月營收總合÷股數）。"
+           "優點：營收比盈餘穩定、不易被經理人操弄；適用景氣循環股、虧損中或轉型期公司（盈餘失真時的替代方案）。"
+           "投資家日報 2026-07-07 起對轉型期企業（如拓凱4536）改用『近60天滾動式股價營收比 × 每股營收』當合理價。",
 }
 
 
@@ -330,7 +336,10 @@ def _mdv_report_cached(sid: str, current_price: float):
 def show_valuation_overview(sid: str, current_price: Optional[float]):
     """估值分頁頂部總覽：所有估值法的目標價放在同一把價格尺上直接比較。
     回傳 mdv 報告 dict，供下方明細區重用（避免重算）。"""
-    st.markdown("## 🎯 估值總覽——六法同一把尺")
+    st.markdown("## 🎯 估值總覽——全部評價法同一把尺")
+    st.caption("孫慶龍體系完整呈現：內在價值法（DCF）＋財務比率法全 5 種（現金報酬率、本益比、"
+               "本益成長比PEG、股價淨值比PBR、股價營收比PSR）＋投顧共識。"
+               "各法優缺點與適用情境不同，**全部並陳、由你自己判斷**，不因作者偏好而只呈現單一方法。")
 
     with st.spinner("彙整各估值法（FinMind 財報/現金流/同業 + 知識庫投顧報告）…"):
         rep = _mdv_report_cached(sid, current_price)
@@ -360,6 +369,15 @@ def show_valuation_overview(sid: str, current_price: Optional[float]):
     peg = rep.get("targets", {}).get("peg")
     if peg and peg.get("fair_price"):
         rows.append(("本益成長比PEG＝1 公允價", "預估EPS×EPS年增率（林區）", peg["fair_price"], None, None))
+    pbr = rep.get("pbr")
+    if pbr and pbr.get("neutral"):
+        rows.append(("股價淨值比PBR 合理價", "每股淨值×近3年PBR中位數（葛拉漢）",
+                     pbr["neutral"], pbr.get("conservative"), pbr.get("optimistic")))
+    psr = rep.get("psr")
+    if psr and psr.get("fair_price_rolling"):
+        rows.append((f"股價營收比PSR 滾動合理價（{psr['rolling_days']}日）",
+                     "每股營收×近60日滾動平均PSR（投資家日報口徑）",
+                     psr["fair_price_rolling"], psr.get("conservative"), psr.get("optimistic")))
     adv = rep.get("advisor_analysis", {})
     if adv.get("avg_target_price"):
         rows.append(("投顧平均目標價", "法人共識（知識庫報告平均）", adv["avg_target_price"], None, None))
@@ -418,8 +436,9 @@ def show_valuation_overview(sid: str, current_price: Optional[float]):
             "信號": "🔴 買進" if current_price < tgt else "🟢 偏貴",
         })
     st.dataframe(pd.DataFrame(df_rows), hide_index=True, width="stretch")
-    st.caption("縮寫對照：DCF＝現金流量折現法　P/E＝本益比　PEG＝本益成長比　EPS＝每股盈餘　"
-               "P/CF＝股價現金流比　FCF＝自由現金流量　ROE＝股東權益報酬率。完整公式見下方各明細區的 ❓。")
+    st.caption("縮寫對照：DCF＝現金流量折現法　P/E＝本益比　PEG＝本益成長比　PBR＝股價淨值比　"
+               "PSR＝股價營收比　EPS＝每股盈餘　P/CF＝股價現金流比　FCF＝自由現金流量　"
+               "ROE＝股東權益報酬率。完整公式見下方各明細區的 ❓。")
 
     # ── 體質檢查 ＋ 綜合判定 ──
     n_buy = sum(1 for r in rows if current_price < r[2])
@@ -452,8 +471,9 @@ def show_multidim_valuation(sid: str, current_price: float, advisor_reports: lis
     股價 < 目標價 = 買進訊號。每個數字皆有 ❓ 說明，且全部來自真實資料。
     extra_targets: [(名稱, 目標價), ...] 額外納入最後的目標價彙整表（例如 DCF 買進價）。"""
     st.markdown("## 💎 財務比率法：多維度目標價")
-    st.caption("核心：孫慶龍 8 步驟法的『預估EPS』。再用 P/E（兩個基準：自家歷史＋同業）、PEG、P/CF "
-               "多角度算目標價，並與投顧報告反推對照。**股價 < 中性目標價 = 買進**。所有數字 hover ❓ 看算法。")
+    st.caption("財務比率法全 5 種並陳：P/E 本益比（兩個基準：自家歷史＋同業）、PEG 本益成長比、"
+               "PBR 股價淨值比、PSR 股價營收比、P/CF 本流法，再與投顧報告反推對照"
+               "（現金報酬率見下方獨立區塊）。**股價 < 中性目標價 = 買進**。所有數字 hover ❓ 看算法。")
 
     if rep is None:
         with st.spinner("彙整真實資料（FinMind 財報/現金流/同業 + 知識庫投顧報告）…"):
@@ -542,6 +562,67 @@ def show_multidim_valuation(sid: str, current_price: float, advisor_reports: lis
 
     st.divider()
 
+    # ── PBR 股價淨值比 ────────────────────────────────────────────────
+    st.markdown("### 📏 股價淨值比 PBR（葛拉漢・資產角度）")
+    pbr = rep.get("pbr")
+    if pbr:
+        lo_m, mid_m, hi_m = pbr["multiples"]
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("當前股價淨值比 PBR", f"{pbr['current_pbr']}",
+                  help=VALUATION_HELP["pbr"] + f"　每股淨值 {pbr['bvps']:,.1f} 元（最新收盤÷最新PBR反推）。")
+        for col, key, label, m in ((b2, "conservative", "便宜", lo_m),
+                                   (b3, "neutral", "合理", mid_m),
+                                   (b4, "optimistic", "昂貴", hi_m)):
+            tgt = pbr.get(key)
+            up = _upside(tgt, current_price)
+            col.metric(f"{label}價 ×{m}", f"{tgt:,.0f}" if tgt else "—",
+                       f"{up:+.1f}%" if up is not None else None,
+                       delta_color="inverse",
+                       help=f"{label}價＝每股淨值 {pbr['bvps']:,.1f} × 近3年PBR百分位倍數 {m}。{pbr['source']}")
+        if current_price:
+            if current_price < pbr["conservative"]:
+                st.caption("🔴 現價低於便宜價（近3年 PBR 兩成分位以下）——資產角度深度便宜。")
+            elif current_price > pbr["optimistic"]:
+                st.caption("🟢 現價高於昂貴價（近3年 PBR 八成分位以上）——資產角度偏貴。")
+            else:
+                st.caption("🟡 現價落在近3年 PBR 常態區間內。")
+    else:
+        st.info("PBR：FinMind 每日 PBR 資料不足（需至少 60 個交易日），無法計算。")
+
+    st.divider()
+
+    # ── PSR 股價營收比 ────────────────────────────────────────────────
+    st.markdown("### 🧾 股價營收比 PSR（營收評價・轉型期/景氣循環/虧損企業適用）")
+    psr = rep.get("psr")
+    if psr:
+        lo_m, mid_m, hi_m = psr["multiples"]
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("當前股價營收比 PSR", f"{psr['current_psr']}",
+                  help=VALUATION_HELP["psr"] + f"　每股營收 {psr['rev_ps']:,.1f} 元"
+                       f"（近12月營收 {psr['rev_12m']/1e8:,.0f} 億 ÷ 股數）。")
+        roll_up = _upside(psr.get("fair_price_rolling"), current_price)
+        s2.metric(f"★ 滾動合理價（{psr['rolling_days']}日均PSR {psr['psr_rolling']}）",
+                  f"{psr['fair_price_rolling']:,.0f}" if psr.get("fair_price_rolling") else "—",
+                  f"{roll_up:+.1f}%" if roll_up is not None else None,
+                  delta_color="inverse",
+                  help=f"投資家日報 2026-07-07 口徑：近{psr['rolling_days']}個交易日 PSR 平均 "
+                       f"{psr['psr_rolling']} × 每股營收 {psr['rev_ps']:,.1f} 元＝合理價。"
+                       f"（日報範例：拓凱 近60天平均 1.6 倍 → 合理價 159.58 元）")
+        for col, key, label, m in ((s3, "conservative", "便宜", lo_m),
+                                   (s4, "optimistic", "昂貴", hi_m)):
+            tgt = psr.get(key)
+            up = _upside(tgt, current_price)
+            col.metric(f"{label}價 ×{m}", f"{tgt:,.0f}" if tgt else "—",
+                       f"{up:+.1f}%" if up is not None else None,
+                       delta_color="inverse",
+                       help=f"{label}價＝每股營收 {psr['rev_ps']:,.1f} × 近3年PSR百分位倍數 {m}。{psr['source']}")
+        st.caption("營收難被操弄、比盈餘穩定——盈餘失真（轉型期/景氣循環/虧損）時的主力評價法；"
+                   "缺點是不看獲利品質，獲利穩定的公司仍以本益比/DCF 為主。")
+    else:
+        st.info("PSR：缺月營收或發行股數資料，無法計算。")
+
+    st.divider()
+
     # ── P/CF ─────────────────────────────────────────────────────────
     st.markdown("### 💧 股價現金流比 P/CF（本流法・現金流檢查）")
     pcf = rep.get("pcf")
@@ -601,6 +682,11 @@ def show_multidim_valuation(sid: str, current_price: float, advisor_reports: lis
         summary_rows.append(("本益比P/E（同業）中性", ti.get("neutral")))
     if peg and peg.get("fair_price"):
         summary_rows.append(("本益成長比PEG=1 公允價", peg["fair_price"]))
+    if pbr:
+        summary_rows.append(("股價淨值比PBR 合理價", pbr.get("neutral")))
+    if psr:
+        summary_rows.append((f"股價營收比PSR 滾動合理價（{psr['rolling_days']}日）",
+                             psr.get("fair_price_rolling")))
     if adv.get("avg_target_price"):
         summary_rows.append(("投顧平均", adv["avg_target_price"]))
     for name, t in (extra_targets or []):

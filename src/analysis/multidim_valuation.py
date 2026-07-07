@@ -3,6 +3,9 @@
 以孫慶龍 8 步驟法的「預估 EPS」為核心，搭配多維度評價：
   • P/E：保守/中性/樂觀目標價（兩個基準：①這檔自己的歷史 P/E ②同業 P/E）
   • PEG：用「真實 EPS 年增率」算公允價與當前 PEG（Peter Lynch，PEG=1 為公允）
+  • PBR：近3年每日股價淨值比百分位 × 每股淨值（葛拉漢；比率法第4種）
+  • PSR：近3年每日股價營收比百分位 × 每股營收 + 60日滾動合理價（比率法第5種，
+         投資家日報 2026-07-07 起對轉型期企業改用的主要評價法）
   • P/CF：當前股價 ÷ 近四季每股自由現金流（檢查獲利是否有現金支撐）
   • 投顧共識：讀知識庫投顧報告，反推目標價隱含 P/E
 
@@ -446,6 +449,31 @@ def generate_valuation_report(sid: str, current_price: Optional[float],
         }
         targets["peg"] = peg_block
 
+    # PBR 股價淨值比帶（葛拉漢；比率法第4種）
+    pbr_block = None
+    try:
+        pbr = val.pbr_band(sid)
+        if pbr:
+            pbr_block = {k: pbr[k] for k in
+                         ("multiples", "current_pbr", "bvps",
+                          "conservative", "neutral", "optimistic", "source")}
+            targets["pbr"] = pbr_block
+    except Exception:
+        pass
+
+    # PSR 股價營收比帶（比率法第5種；投資家日報 2026-07-07 起的轉型期主要評價法）
+    psr_block = None
+    try:
+        psr = val.psr_band(sid, shares_ntd)
+        if psr:
+            psr_block = {k: psr[k] for k in
+                         ("multiples", "current_psr", "psr_rolling", "rolling_days",
+                          "rev_ps", "rev_12m", "fair_price_rolling",
+                          "conservative", "neutral", "optimistic", "source")}
+            targets["psr"] = psr_block
+    except Exception:
+        pass
+
     # P/CF：當前每股自由現金流 & 當前 P/CF
     pcf = fcf_per_share(sid, shares_ntd)
     pcf_block = None
@@ -477,6 +505,8 @@ def generate_valuation_report(sid: str, current_price: Optional[float],
         "historical_basis": hist_basis,
         "industry_basis": ind_basis,
         "growth": growth,
+        "pbr": pbr_block,
+        "psr": psr_block,
         "pcf": pcf_block,
         "advisor_analysis": advisor,
         "targets": targets,

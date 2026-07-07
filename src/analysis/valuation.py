@@ -102,3 +102,108 @@ def dividend_analysis(sid: str, price: float | None) -> dict[str, Any]:
         out["yield_ttm_pct"] = round(ttm_sum / price * 100, 2)
         out["yield_forward_pct"] = round(annualized / price * 100, 2)
     return out
+
+
+def pbr_band(sid: str, years: int = 3, percentiles=(20, 50, 80)) -> dict[str, Any]:
+    """股價淨值比 PBR 評價帶（葛拉漢式，孫慶龍財務比率法第 4 種）。
+
+    FinMind TaiwanStockPER 有每日 PBR，直接取近 N 年百分位當便宜/合理/昂貴倍數；
+    每股淨值由「最新收盤 ÷ 最新 PBR」反推（與 PBR 序列同一口徑，不會對不上）。
+    回傳: {df, multiples, current_pbr, bvps, conservative, neutral, optimistic, source}
+    """
+    days = years * 365 + 30
+    raw = fm.per_pbr(sid, days=days)
+    if raw.empty or "PBR" not in raw.columns:
+        return {}
+    df = raw[["date", "PBR"]].copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["PBR"] = pd.to_numeric(df["PBR"], errors="coerce")
+    df = df.dropna(subset=["PBR"])
+    df = df[df["PBR"] > 0].sort_values("date")
+    if len(df) < 60:
+        return {}
+
+    current_pbr = float(df["PBR"].iloc[-1])
+    price = fm.stock_price(sid, days=15)
+    if price.empty:
+        return {}
+    close = float(pd.to_numeric(price["close"], errors="coerce").dropna().iloc[-1])
+    bvps = close / current_pbr
+
+    lo, mid, hi = (round(float(np.percentile(df["PBR"], p)), 2) for p in percentiles)
+    return {
+        "df": df,
+        "multiples": [lo, mid, hi],
+        "current_pbr": round(current_pbr, 2),
+        "bvps": round(bvps, 2),
+        "conservative": round(lo * bvps, 2),
+        "neutral": round(mid * bvps, 2),
+        "optimistic": round(hi * bvps, 2),
+        "source": f"近{years}年每日 PBR 百分位({percentiles[0]}/{percentiles[1]}/{percentiles[2]}) × 每股淨值 {bvps:,.1f} 元（最新收盤÷最新PBR反推）",
+    }
+
+
+def psr_band(sid: str, shares: float | None, years: int = 3,
+             percentiles=(20, 50, 80), rolling_days: int = 60) -> dict[str, Any]:
+    """股價營收比 PSR 評價帶（孫慶龍財務比率法第 5 種；投資家日報 2026-07-07 起
+    對轉型期企業改用的主要評價法）。
+
+    口徑對齊日報：每股營收 = 近 12 個月營收總合 ÷ 發行股數；
+    「滾動式股價營收比」= 近 rolling_days 個交易日 PSR 平均 → × 每股營收 = 合理價。
+    另以近 N 年每日 PSR 百分位給便宜/合理/昂貴帶（與本益比河流圖同骨架）。
+    月營收於次月 10 日左右公布，歷史序列以「月份結束後 40 天」視為可得（保守避免前視）。
+    股數採當前值回溯（台股股本變動小，帶 basis 說明）。shares 單位：股。
+    """
+    if not shares or shares <= 0:
+        return {}
+    rev = fm.month_revenue(sid, days=years * 365 + 460)
+    if rev.empty:
+        return {}
+    rev = rev.copy()
+    rev["revenue"] = pd.to_numeric(rev["revenue"], errors="coerce")
+    rev = rev.dropna(subset=["revenue"])
+    rev["ym"] = pd.to_datetime(rev["revenue_year"].astype(int).astype(str) + "-"
+                               + rev["revenue_month"].astype(int).astype(str).str.zfill(2) + "-01")
+    rev = rev.sort_values("ym").drop_duplicates("ym", keep="last")
+    rev["rev_12m"] = rev["revenue"].rolling(12).sum()
+    rev = rev.dropna(subset=["rev_12m"])
+    if rev.empty:
+        return {}
+    # 該月營收約在次月 10 日公布 → 月初 +40 天當可得日
+    rev["avail"] = rev["ym"] + pd.Timedelta(days=40)
+
+    price = fm.stock_price(sid, days=years * 365 + 60)
+    if price.empty:
+        return {}
+    px = price[["date", "close"]].copy()
+    px["date"] = pd.to_datetime(px["date"])
+    px["close"] = pd.to_numeric(px["close"], errors="coerce")
+    px = px.dropna().sort_values("date")
+
+    merged = pd.merge_asof(px, rev[["avail", "rev_12m"]].rename(columns={"avail": "date"}),
+                           on="date", direction="backward").dropna(subset=["rev_12m"])
+    if len(merged) < 60:
+        return {}
+    merged["rev_ps"] = merged["rev_12m"] / shares
+    merged["psr"] = merged["close"] / merged["rev_ps"]
+
+    rev_ps_now = float(merged["rev_ps"].iloc[-1])
+    current_psr = float(merged["psr"].iloc[-1])
+    psr_roll = float(merged["psr"].tail(rolling_days).mean())
+
+    lo, mid, hi = (round(float(np.percentile(merged["psr"], p)), 2) for p in percentiles)
+    return {
+        "df": merged,
+        "multiples": [lo, mid, hi],
+        "current_psr": round(current_psr, 2),
+        "psr_rolling": round(psr_roll, 2),
+        "rolling_days": rolling_days,
+        "rev_ps": round(rev_ps_now, 2),
+        "rev_12m": float(merged["rev_12m"].iloc[-1]),
+        "fair_price_rolling": round(psr_roll * rev_ps_now, 2),   # 日報口徑合理價
+        "conservative": round(lo * rev_ps_now, 2),
+        "neutral": round(mid * rev_ps_now, 2),
+        "optimistic": round(hi * rev_ps_now, 2),
+        "source": f"近{years}年每日 PSR 百分位({percentiles[0]}/{percentiles[1]}/{percentiles[2]}) × 每股營收 {rev_ps_now:,.1f} 元"
+                  f"（近12月營收 {merged['rev_12m'].iloc[-1]/1e8:,.0f} 億 ÷ 股數，股數採當前值回溯）",
+    }
