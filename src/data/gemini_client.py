@@ -5,8 +5,10 @@
 """
 from __future__ import annotations
 
+import base64
 import os
 import time
+from pathlib import Path
 
 import requests
 
@@ -33,12 +35,11 @@ def _model() -> str:
     return os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
 
 
-def generate(prompt: str, timeout: int = 90) -> str:
+def _post(payload: dict, timeout: int) -> str:
     key = os.environ.get("GEMINI_KEY")
     if not key:
         raise GeminiNotConfigured("未設定 GEMINI_KEY（請在 .env 填入，與 GAS 晨報同一把）")
     url = ENDPOINT.format(model=_model())
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
     # 金鑰放 header，不放 URL query：避免 HTTPError 訊息把 ?key=... 整串金鑰印出來
     headers = {"x-goog-api-key": key}
@@ -48,7 +49,8 @@ def generate(prompt: str, timeout: int = 90) -> str:
             wait = 30 * (attempt + 1)   # 30s / 60s / 90s
             time.sleep(wait)
             continue
-        resp.raise_for_status()
+        if not resp.ok:  # 帶出 API 回應內文，方便除錯（金鑰在 header 不會外洩）
+            raise RuntimeError(f"Gemini HTTP {resp.status_code}：{resp.text[:500]}")
         data = resp.json()
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -56,6 +58,60 @@ def generate(prompt: str, timeout: int = 90) -> str:
             raise RuntimeError(f"Gemini 回應格式非預期：{data}") from e
 
     raise RuntimeError("Gemini 連續暫時性錯誤(429/5xx)，已重試 3 次仍失敗，請稍後再試")
+
+
+def generate(prompt: str, timeout: int = 90) -> str:
+    return _post({"contents": [{"parts": [{"text": prompt}]}]}, timeout)
+
+
+# inline_data 整包請求上限 20MB，base64 會膨脹 ~33%，故原始 PDF 限 15MB。
+# 更大的（高解析掃描檔，Gemini 對 PDF 文件另有 50MB 硬限制）
+# 改成本機把前幾頁渲染成 JPEG 縮圖再 inline 送，任何大小都能處理。
+_MAX_INLINE_PDF_MB = 15
+
+
+def _pdf_pages_as_jpegs(pdf_path: Path, max_pages: int = 8) -> list[bytes]:
+    """用 pypdfium2 把前 max_pages 頁渲染成 JPEG（長邊 1600px，OCR 足夠）。"""
+    import io
+
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(str(pdf_path))
+    out = []
+    try:
+        for i in range(min(len(doc), max_pages)):
+            img = doc[i].render(scale=2.0).to_pil()  # 72dpi × 2 = 144dpi
+            img.thumbnail((1600, 1600))
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "JPEG", quality=80)
+            out.append(buf.getvalue())
+    finally:
+        doc.close()
+    return out
+
+
+def generate_with_pdf(prompt: str, pdf_path: str | Path,
+                      timeout: int = 300, max_pages: int = 8) -> str:
+    """帶 PDF 附件呼叫 Gemini（多模態）。掃描檔（無文字層）由模型直接 OCR。
+
+    ≤15MB 整份 inline；更大的改送前 max_pages 頁的 JPEG 縮圖。
+    """
+    pdf_path = Path(pdf_path)
+    data = pdf_path.read_bytes()
+
+    if len(data) <= _MAX_INLINE_PDF_MB * 1024 * 1024:
+        parts = [{"inline_data": {
+            "mime_type": "application/pdf",
+            "data": base64.b64encode(data).decode("ascii"),
+        }}]
+    else:
+        parts = [{"inline_data": {
+            "mime_type": "image/jpeg",
+            "data": base64.b64encode(jpg).decode("ascii"),
+        }} for jpg in _pdf_pages_as_jpegs(pdf_path, max_pages)]
+
+    parts.append({"text": prompt})
+    return _post({"contents": [{"parts": parts}]}, timeout)
 
 
 def summarize_news(titles: list[str], stock_id: str) -> str:

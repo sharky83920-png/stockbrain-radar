@@ -43,5 +43,17 @@ def remove(sid: str) -> None:
     _save([i for i in load() if i["sid"] != sid])
 
 
+def move(sid: str, delta: int) -> None:
+    """把 sid 往上（delta=-1）或往下（delta=+1）移一格，越界不動作。"""
+    items = load()
+    idx = next((i for i, it in enumerate(items) if it["sid"] == sid), None)
+    if idx is None:
+        return
+    j = idx + delta
+    if 0 <= j < len(items):
+        items[idx], items[j] = items[j], items[idx]
+        _save(items)
+
+
 def contains(sid: str) -> bool:
     return any(i["sid"] == sid for i in load())

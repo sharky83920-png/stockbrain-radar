@@ -5,3 +5,4 @@ plotly>=5.24
 python-dotenv>=1.0
 truststore>=0.9
 yfinance>=0.2          # 國際情勢專家：即時市場行情（台幣/費半/VIX/美債殖利率）
+pypdfium2>=5.10        # reader：大型 PDF 渲染成 JPEG 縮圖再送 Gemini

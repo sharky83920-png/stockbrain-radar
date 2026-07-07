@@ -1,9 +1,11 @@
 """
 統一待閱讀區處理器
 
-掃描 待閱讀區/*.pdf，自動判斷類型：
+掃描 待閱讀區/*.pdf，自動判斷類型。
+掃描檔（無文字層的圖片型 PDF）會自動改用 Gemini 多模態 OCR 轉錄後照常處理。
   - 投資家日報  → Gemini 萃取 → 知識庫/個股/{sid}/投資家日報/*.md
   - 投顧報告    → Gemini 萃取 → 知識庫/個股/{sid}/投顧報告/*.md
+  - 書籍掃描    → Gemini 讀書筆記 → 知識庫/書籍筆記/{書名}/*.md
   - 無法判斷    → 知識庫/個股/_未分類/*.md（不移動，提示人工確認）
 
 原始 PDF 統一移至：原始資料庫（原始格式）/{類型}/
@@ -41,6 +43,8 @@ BROKER_MARKERS  = ["凱基", "元大證券", "富邦證券", "國泰證券", "�
                    "中信證券", "永豐金證券", "兆豐證券", "第一金證券",
                    "目標價", "投資評等", "Buy", "Outperform", "Neutral",
                    "12個月目標", "12-Month Target"]
+# 書籍掃描：有「第X篇/章」章節結構或 ISBN（日報與投顧報告不會有）
+BOOK_PAT = re.compile(r"第\s*[0-9一二三四五六七八九十百]+\s*[篇章]")
 
 
 def _read_text(pdf: Path, max_pages: int = 8) -> str:
@@ -54,13 +58,38 @@ def _read_text(pdf: Path, max_pages: int = 8) -> str:
         return ""
 
 
+_OCR_PROMPT = """以上是一份掃描文件（圖片型，沒有文字層），最多取前 {max_pages} 頁。
+請將其中的文字完整轉錄為純文字，依原始閱讀順序輸出，
+保留所有數字、日期、股票代號與表格內容（表格用文字排版即可）。
+不要翻譯、不要摘要、不要加任何說明或註解。"""
+
+
+def _ocr_text(pdf: Path, max_pages: int = 8) -> str:
+    """掃描檔備援：PDF 丟給 Gemini 多模態直接 OCR。"""
+    if not gem.is_configured():
+        print("  ⚠️  掃描檔需要 Gemini OCR，但未設定 GEMINI_KEY。")
+        return ""
+    print(f"  🔎 無文字層（掃描檔），改用 Gemini OCR（前 {max_pages} 頁）...")
+    try:
+        return gem.generate_with_pdf(_OCR_PROMPT.format(max_pages=max_pages),
+                                     pdf, max_pages=max_pages)
+    except Exception as e:
+        print(f"  ⚠️  Gemini OCR 失敗：{e}")
+        return ""
+
+
 def _detect(pdf: Path, text: str) -> str:
-    """回傳 'daily' / 'broker' / 'unknown'"""
+    """回傳 'daily' / 'broker' / 'book' / 'unknown'"""
     name = pdf.name
-    sample = (name + text[:800]).lower()
-    if any(m in name or m in text[:800] for m in DAILY_MARKERS):
+    head = text[:800]
+    # 明確的日報字樣優先（書裡也可能出現作者名，但不會自稱投資家日報）
+    if any(m in name or m in head for m in ("投資家日報", "投資家觀點", "InvestorDaily")):
         return "daily"
-    if any(m in name or m in text[:800] for m in BROKER_MARKERS):
+    if BOOK_PAT.search(text[:3000]) or "ISBN" in text[:3000]:
+        return "book"
+    if any(m in name or m in head for m in DAILY_MARKERS):
+        return "daily"
+    if any(m in name or m in head for m in BROKER_MARKERS):
         return "broker"
     return "unknown"
 
@@ -268,6 +297,97 @@ original_file: {pdf.name}
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 書籍掃描處理
+# ══════════════════════════════════════════════════════════════════════════
+_BOOK_PROMPT = """你是投資書籍閱讀助理。以下是一本投資書籍掃描章節的 OCR 全文，請整理成讀書筆記。
+
+【全文】
+{text}
+
+【輸出：只回傳 JSON，不要其他文字】
+{{
+  "book": "書名（若文中可辨識，否則null）",
+  "author": "作者（若文中可辨識，否則null）",
+  "chapter": "本段章節主題（15字內）",
+  "summary": "章節摘要（3~5句）",
+  "key_concepts": ["核心概念1（一句話講清楚）", "核心概念2", "核心概念3"],
+  "quotes": ["值得記住的原文金句1", "金句2"],
+  "apply": ["投資實務上怎麼應用1", "怎麼應用2"]
+}}"""
+
+_BOOK_FULL_PAGES = 50  # 書籍章節重新 OCR 的頁數上限
+
+
+def _process_book(pdf: Path, text: str, was_ocr: bool) -> None:
+    # 偵測用的 OCR 只轉了前 8 頁；確定是書籍後補轉完整章節
+    if was_ocr:
+        full = _ocr_text(pdf, max_pages=_BOOK_FULL_PAGES)
+        if len(full.strip()) > len(text.strip()):
+            text = full
+
+    info = None
+    if gem.is_configured():
+        try:
+            raw = gem.generate(_BOOK_PROMPT.format(text=text[:20000]))
+            raw = re.sub(r"^```[a-z]*\n?", "", raw.strip())
+            raw = re.sub(r"\n?```$", "", raw.strip())
+            info = json.loads(raw)
+        except Exception as e:
+            print(f"  ⚠️  Gemini 萃取失敗：{e}")
+    if not info:
+        info = {"book": None, "author": None, "chapter": pdf.stem[:20],
+                "summary": "", "key_concepts": [], "quotes": [], "apply": []}
+
+    book    = info.get("book") or "未知書籍"
+    author  = info.get("author") or ""
+    chapter = info.get("chapter") or pdf.stem[:20]
+    kc = "\n".join(f"- {c}" for c in info.get("key_concepts", []))
+    qt = "\n".join(f"> {q}" for q in info.get("quotes", []))
+    ap = "\n".join(f"- {a}" for a in info.get("apply", []))
+
+    md = f"""---
+date: {datetime.now().strftime("%Y-%m-%d")}
+source: 書籍掃描
+book: {book}
+author: {author}
+chapter: {chapter}
+tags: [書籍筆記]
+original_file: {pdf.name}
+---
+
+# {book}｜{chapter}
+
+## 章節摘要
+{info.get("summary", "")}
+
+## 核心概念
+{kc or "（見全文）"}
+
+## 重點金句
+{qt or "（見全文）"}
+
+## 投資上怎麼用
+{ap or "（見全文）"}
+
+---
+
+## 附錄：OCR 全文
+
+{text}
+"""
+    book_slug = re.sub(r"[^\w一-鿿]", "", book)[:30] or "未知書籍"
+    out_dir = KB_DIR.parent / "書籍筆記" / book_slug
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{pdf.stem}.md").write_text(md, encoding="utf-8")
+    print(f"  ✅ [書籍] → {out_dir.relative_to(VAULT)}/{pdf.stem}.md")
+
+    dest = ARCHIVE_DIR / "書籍" / pdf.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(pdf), str(dest))
+    print(f"  📦 PDF → {dest.relative_to(VAULT)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 未知類型
 # ══════════════════════════════════════════════════════════════════════════
 def _process_unknown(pdf: Path, text: str):
@@ -299,42 +419,66 @@ original_file: {pdf.name}
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
 
+    print("""
+ ╔══════════════════════════════════════════════════╗
+ ║   📚  StockBrain 統一閱讀器                        ║
+ ║                                                  ║
+ ║   自動判斷 PDF 類型並分別整理：                      ║
+ ║     📰 投資家日報  → 知識庫/個股/投資家日報           ║
+ ║     📑 投顧報告    → 知識庫/個股/投顧報告             ║
+ ║     📖 書籍掃描    → 知識庫/書籍筆記                  ║
+ ║     ❓ 無法判斷    → 知識庫/個股/_未分類（人工確認）   ║
+ ║     🔎 掃描檔自動 Gemini OCR，免手動轉檔             ║
+ ╚══════════════════════════════════════════════════╝
+""")
+    print(f"📂 待閱讀區：{PENDING_DIR}\n")
+
     if not PENDING_DIR.exists():
         print(f"❌ 待閱讀區不存在：{PENDING_DIR}")
         return
 
     pdfs = sorted(PENDING_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)
     if not pdfs:
-        print("📭 待閱讀區沒有 PDF。")
+        print("📭 待閱讀區沒有 PDF。把 PDF 放進待閱讀區後再執行。")
         return
 
     print(f"🔍 掃描到 {len(pdfs)} 個 PDF ...\n")
-    results = {"daily": 0, "broker": 0, "unknown": 0}
+    results = {"daily": 0, "broker": 0, "book": 0, "unknown": 0}
+    labels  = {"daily": "投資家日報", "broker": "投顧報告", "book": "書籍", "unknown": "未知"}
 
     for pdf in pdfs:
         print(f"📄 {pdf.name}")
         text = _read_text(pdf)
+        # 掃描器有時會留幾個字的浮水印文字層，門檻放寬到 40 字才視為有效文字
+        was_ocr = len(text.strip()) < 40
+        if was_ocr:
+            text = _ocr_text(pdf)
         if not text.strip():
             print("  ❌ 無法讀取文字，跳過。")
             continue
 
         kind = _detect(pdf, text)
-        print(f"  🏷️  類型識別：{'投資家日報' if kind=='daily' else '投顧報告' if kind=='broker' else '未知'}")
+        print(f"  🏷️  類型識別：{labels[kind]}")
 
         if kind == "daily":
             _process_daily(pdf, text)
-            results["daily"] += 1
         elif kind == "broker":
             _process_broker(pdf, text)
-            results["broker"] += 1
+        elif kind == "book":
+            _process_book(pdf, text, was_ocr)
         else:
             _process_unknown(pdf, text)
-            results["unknown"] += 1
+        results[kind] += 1
         print()
 
     print("─" * 48)
     print(f"🎉 完成！投資家日報 {results['daily']} 份　投顧報告 {results['broker']} 份　"
-          f"待確認 {results['unknown']} 份")
+          f"書籍 {results['book']} 份　待確認 {results['unknown']} 份")
+    print(f"""
+📁 MD 存入位置：
+   {KB_DIR.parent}
+📦 原始 PDF 已移至：
+   {ARCHIVE_DIR}""")
 
 
 if __name__ == "__main__":

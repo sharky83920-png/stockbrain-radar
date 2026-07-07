@@ -50,7 +50,7 @@ st.set_page_config(page_title="StockBrain Radar", page_icon="📡", layout="wide
 HELP = {
     "per": "本益比 PER（Price/Earnings）= 股價 ÷ 每股盈餘。市場願意為每 1 元獲利付多少錢，越高代表估值越貴。",
     "pbr": "股價淨值比 PBR（Price/Book）= 股價 ÷ 每股淨值。<1 代表股價低於帳面價值。",
-    "peg": "本益成長比 PEG = 本益比 ÷ EPS年增率(%)。成長股看 PEG：<1 偏便宜、1~2 合理、>2 偏貴。",
+    "peg": "本益成長比 PEG（P/E to Growth）= 本益比 ÷ 每股盈餘EPS年增率(%)。成長股看 PEG：<1 偏便宜、1~2 合理、>2 偏貴。",
     "roe": "股東權益報酬率 ROE（Return on Equity）= 稅後淨利 ÷ 股東權益。代表用股東的錢賺錢的效率，>15% 算優秀。此為近四季(TTM)估算。",
     "eps_ttm": "每股盈餘 EPS（Earnings Per Share）近四季加總（TTM＝Trailing Twelve Months）。",
     "gross": "毛利率 = 毛利 ÷ 營收。反映產品本身的賺錢能力。",
@@ -64,7 +64,7 @@ HELP = {
     "margin": "融資餘額：投資人借錢買股的未償還張數。過高代表散戶熱情、上漲動能可能耗盡。",
     "yield_ttm": "近一年殖利率 = 近一年實際配發現金股利加總 ÷ 目前股價。",
     "yield_fwd": "年化殖利率（預估）= 最近一次現金股利 × 一年配發次數 ÷ 目前股價。屬前瞻性預估，非保證。",
-    "river": "本益比河流圖：彩色帶＝各本益比倍數 ×（近四季EPS）對應的股價。黑線（收盤價）落在低帶＝便宜、落在高帶＝貴。EPS 以季底估算，故換季時帶會跳動。",
+    "river": "本益比河流圖：彩色帶＝各本益比倍數 ×（近四季每股盈餘EPS）對應的股價。黑線（收盤價）落在低帶＝便宜、落在高帶＝貴。EPS 以季底估算，故換季時帶會跳動。",
 }
 
 
@@ -428,20 +428,51 @@ def _pos_red_neg_green(v):
 
 # --- Sidebar ---------------------------------------------------------------
 st.sidebar.title("📡 StockBrain Radar")
-st.session_state.setdefault("sid_input", "2330")
-# 市場地圖點擊跳轉：用暫存 key 避免「widget 已渲染後不能改 state」的限制
-if "_map_pending_sid" in st.session_state and st.session_state["_map_pending_sid"]:
-    st.session_state["sid_input"] = st.session_state.pop("_map_pending_sid")
-sid = st.sidebar.text_input("股票代號（如 2330）", key="sid_input").strip()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _stock_options() -> list[str]:
+    """全市場「代號 中文名」清單，供側欄搜尋（打中文名或代號都能過濾）。"""
+    try:
+        info = fm.all_stock_info()
+        info = info[info["stock_id"].astype(str).str.fullmatch(r"\d{4}")]
+        info = info.drop_duplicates("stock_id").sort_values("stock_id")
+        return [f"{r.stock_id} {r.stock_name}" for r in info.itertuples()]
+    except Exception:
+        return []
+
+
+_opts = _stock_options()
+_opt_by_sid = {o.split(" ", 1)[0]: o for o in _opts}
+
+# 清單點選 / 市場地圖跳轉：用暫存 key 避免「widget 已渲染後不能改 state」的限制
+st.session_state.setdefault("sid_select", _opt_by_sid.get("2330"))
+if st.session_state.get("_map_pending_sid"):
+    _p = str(st.session_state.pop("_map_pending_sid")).strip()
+    st.session_state["sid_select"] = _opt_by_sid.get(_p, f"{_p} {_p}")
+
+if _opts:
+    _cur = st.session_state.get("sid_select")
+    _options = _opts if (_cur is None or _cur in _opt_by_sid.values()) else [_cur] + _opts
+    _choice = st.sidebar.selectbox(
+        "股票（輸入中文名或代號搜尋）", _options, key="sid_select",
+        help="點一下直接打字即可搜尋：中文（如 台積）或代號（如 2330）都行。")
+    sid = _choice.split(" ", 1)[0].strip() if _choice else ""
+else:  # FinMind 全市場清單抓不到時退回純代號輸入
+    sid = st.sidebar.text_input("股票代號（如 2330）", value="2330").strip()
 st.sidebar.caption("資料來源：FinMind / Google News。當日快取，僅供個人研究。")
 
 
 def _select_sid(s):
-    st.session_state.sid_input = s
+    st.session_state["_map_pending_sid"] = s
 
 
 def _remove_sid(s):
     watchlist.remove(s)
+
+
+def _move_sid(s, d):
+    watchlist.move(s, d)
 
 
 def _add_current(s, nm):
@@ -465,10 +496,15 @@ st.sidebar.subheader("⭐ 我的清單")
 _wl = watchlist.load()
 if _wl:
     for _it in _wl:
-        c1, c2 = st.sidebar.columns([4, 1])
+        c1, c2, c3, c4 = st.sidebar.columns([3.4, 0.8, 0.8, 0.8])
         c1.button(f"{_it['name']}({_it['sid']})", key=f"wl_{_it['sid']}",
                   width="stretch", on_click=_select_sid, args=(_it["sid"],))
-        c2.button("✕", key=f"rm_{_it['sid']}", on_click=_remove_sid, args=(_it["sid"],))
+        c2.button("↑", key=f"up_{_it['sid']}", on_click=_move_sid, args=(_it["sid"], -1),
+                  help="往上移")
+        c3.button("↓", key=f"dn_{_it['sid']}", on_click=_move_sid, args=(_it["sid"], 1),
+                  help="往下移")
+        c4.button("✕", key=f"rm_{_it['sid']}", on_click=_remove_sid, args=(_it["sid"],),
+                  help="移出清單")
 else:
     st.sidebar.caption("還沒有收藏，下方可加入。")
 
@@ -556,22 +592,54 @@ def _stock_specific_events(sid: str):
         return []
 
 
+_Q_LABEL = {5: "Q1", 8: "Q2", 11: "Q3", 3: "年報"}
+_Q_END   = {5: (0, 3, 31), 8: (0, 6, 30), 11: (0, 9, 30), 3: (-1, 12, 31)}  # 截止月 → 該期季底
+
+
 @st.cache_data(ttl=3600)
 def _stock_calendar(sid: str):
-    """本檔三大日期：月營收、季財報（法定截止，恆有）、法說會（公告才有，否則未公布）+ 其他個股事件。"""
+    """本檔三大日期：月營收、季財報（法定截止，恆有）、法說會（公告才有，否則未公布）+ 其他個股事件。
+    公司若提早公布（截止日前），事件自動打勾並推進到下一期，不對已公布的數據倒數。"""
+    from src.data import finmind_client as _fm
     from src.data import macro_data as _md
     today = _dt.date.today()
+
+    def _rev_ym(deadline):  # 10 日前公布的是上個月營收
+        return (deadline.year - 1, 12) if deadline.month == 1 else (deadline.year, deadline.month - 1)
+
     rev = _md._next_monthly(today, 10)
-    rev_m = 12 if rev.month == 1 else rev.month - 1  # 10 日前公布的是上個月營收
+    rev_sub = "每月 10 日前 · 月營收領先指標"
+    try:
+        _r = _fm.month_revenue(sid, days=100)
+        if not _r.empty:
+            _last = _r.sort_values(["revenue_year", "revenue_month"]).iloc[-1]
+            if (int(_last["revenue_year"]), int(_last["revenue_month"])) >= _rev_ym(rev):
+                rev_sub = f"{_rev_ym(rev)[1]} 月已公布 ✅ · 每月 10 日前"
+                rev = _md._next_monthly(rev + _dt.timedelta(days=1), 10)
+    except Exception:
+        pass
+    rev_m = _rev_ym(rev)[1]
+
     fin = _md._next_fin_deadline(today)
-    q = {5: "Q1", 8: "Q2", 11: "Q3", 3: "年報"}.get(fin.month, "財報")
+    fin_sub = "法定截止日 · 實際多提早"
+    try:
+        _fs = _fm.financial_statements(sid, days=300)
+        if not _fs.empty:
+            dy, m, d = _Q_END[fin.month]
+            if str(_fs["date"].max())[:10] >= _dt.date(fin.year + dy, m, d).isoformat():
+                fin_sub = f"{_Q_LABEL[fin.month]} 已公布 ✅ · 法定截止日"
+                fin = _md._next_fin_deadline(fin + _dt.timedelta(days=1))
+    except Exception:
+        pass
+    q = _Q_LABEL.get(fin.month, "財報")
+
     evs = _stock_specific_events(sid)
     conf = next((e for e in evs if e["name"] == "法說會"), None)
     return {
         "rev": {"date": rev.isoformat(), "days": (rev - today).days,
-                "label": f"公布 {rev_m} 月營收", "sub": "每月 10 日前 · 月營收領先指標"},
+                "label": f"公布 {rev_m} 月營收", "sub": rev_sub},
         "fin": {"date": fin.isoformat(), "days": (fin - today).days,
-                "label": f"公布 {q} 財報", "sub": "法定截止日 · 實際多提早"},
+                "label": f"公布 {q} 財報", "sub": fin_sub},
         "conf": conf,
         "extras": [e for e in evs if e["name"] != "法說會"],
     }
@@ -861,90 +929,113 @@ with tab_fund:
 
 # --- 估值 ------------------------------------------------------------------
 with tab_val:
-    # 🆕 多維度企業估值（孫慶龍8步驟預估EPS × P/E雙基準 + PEG + P/CF + 投顧反推）
+    # 估值分頁：先給答案再給算式——頂部「估值總覽」把六法目標價放同一把尺直接比較，
+    # 各方法的計算明細全部收進 expander（點開才看）。方法依《超前部署賺好股》第4篇。
     _cur_px = price.get("close") if isinstance(price, dict) else None
-    vdisp.show_sun_forecast(sid)
-    st.divider()
+    _rep = None
     try:
-        vdisp.show_multidim_valuation(sid, _cur_px)
+        _rep = vdisp.show_valuation_overview(sid, _cur_px)
     except Exception as _e:
-        st.error(f"多維度估值計算發生問題：{_e}")
+        st.error(f"估值總覽計算發生問題：{_e}")
+    st.caption("方法出處《超前部署賺好股》：內在價值法（DCF）＋ 財務比率法（現金報酬率/P/E/PEG/P/CF），"
+               "詳見 知識庫/書籍筆記/超前部署賺好股/孫慶龍企業估值方法總整理.md。以下為各方法計算明細（點開展開）。")
     st.divider()
-    st.markdown("## 📦 原有估值指標（籌碼/技術/河流圖/分析師目標價）")
 
-    if isinstance(val, dict) and "error" not in val:
-        a, b, c, d = st.columns(4)
-        _metric(a, "本益比 PER", val.get("per"), help_=HELP["per"])
-        _metric(b, "股價淨值比 PBR", val.get("pbr"), help_=HELP["pbr"])
-        _metric(c, "本益成長比 PEG", val.get("peg"), help_=HELP["peg"])
-        _metric(d, "目前殖利率（FinMind）", val.get("dividend_yield_pct"), "%",
-                help_="FinMind 提供的當日殖利率，僅供對照。下方為自行計算的近一年/年化值。")
+    with st.expander("🔢 孫慶龍 8 步驟法——「預估 EPS」怎麼來（所有比率法的原料）"):
+        vdisp.show_sun_forecast(sid)
 
-        # 股利分析（近一年加總 + 年化預估）
-        div = val.get("dividend") or {}
-        if isinstance(div, dict) and "error" not in div and "note" not in div:
+    with st.expander("🏦 內在價值法：DCF 現金流量折現——買進價/賣出目標（風險貼水可調，總覽即時連動）"):
+        try:
+            vdisp.show_sun_dcf(sid, _cur_px)
+        except Exception as _e:
+            st.error(f"DCF 估值計算發生問題：{_e}")
+
+    with st.expander("💰 現金報酬率——財務比率法之首（作者首選）"):
+        try:
+            vdisp.show_cash_return(sid, _cur_px)
+        except Exception as _e:
+            st.error(f"現金報酬率計算發生問題：{_e}")
+
+    with st.expander("💎 財務比率法：多維度目標價明細（本益比P/E 雙基準・本益成長比PEG・股價現金流比P/CF・投顧反推）"):
+        try:
+            vdisp.show_multidim_valuation(sid, _cur_px, rep=_rep)
+        except Exception as _e:
+            st.error(f"多維度估值計算發生問題：{_e}")
+
+    with st.expander("📦 原有估值指標（本益比PER・股價淨值比PBR・股利・河流圖・分析師目標價）"):
+        if isinstance(val, dict) and "error" not in val:
+            a, b, c, d = st.columns(4)
+            _metric(a, "本益比 PER", val.get("per"), help_=HELP["per"])
+            _metric(b, "股價淨值比 PBR", val.get("pbr"), help_=HELP["pbr"])
+            _metric(c, "本益成長比 PEG", val.get("peg"), help_=HELP["peg"])
+            _metric(d, "目前殖利率（FinMind）", val.get("dividend_yield_pct"), "%",
+                    help_="FinMind 提供的當日殖利率，僅供對照。下方為自行計算的近一年/年化值。")
+
+            # 股利分析（近一年加總 + 年化預估）
+            div = val.get("dividend") or {}
+            if isinstance(div, dict) and "error" not in div and "note" not in div:
+                st.divider()
+                st.markdown("#### 💵 現金股利分析")
+                e, f, g, h = st.columns(4)
+                _metric(e, "近一年現金股利加總", div.get("ttm_cash_dividend"), " 元",
+                        help_=f"近一年共配發 {div.get('ttm_payout_count')} 次")
+                _metric(f, "近一年殖利率", div.get("yield_ttm_pct"), "%", help_=HELP["yield_ttm"])
+                _metric(g, "年化股利預估", div.get("annualized_estimate"), " 元",
+                        help_=f"最近一次現金股利 {div.get('recent_cash_dividend')} 元 ×{div.get('ttm_payout_count')} 次。除息日 {div.get('recent_ex_date')}")
+                _metric(h, "年化殖利率（預估）", div.get("yield_forward_pct"), "%", help_=HELP["yield_fwd"])
+            elif isinstance(div, dict) and "note" in div:
+                st.info(f"股利：{div['note']}")
+
+            # 本益比河流圖
             st.divider()
-            st.markdown("#### 💵 現金股利分析")
-            e, f, g, h = st.columns(4)
-            _metric(e, "近一年現金股利加總", div.get("ttm_cash_dividend"), " 元",
-                    help_=f"近一年共配發 {div.get('ttm_payout_count')} 次")
-            _metric(f, "近一年殖利率", div.get("yield_ttm_pct"), "%", help_=HELP["yield_ttm"])
-            _metric(g, "年化股利預估", div.get("annualized_estimate"), " 元",
-                    help_=f"最近一次現金股利 {div.get('recent_cash_dividend')} 元 ×{div.get('ttm_payout_count')} 次。除息日 {div.get('recent_ex_date')}")
-            _metric(h, "年化殖利率（預估）", div.get("yield_forward_pct"), "%", help_=HELP["yield_fwd"])
-        elif isinstance(div, dict) and "note" in div:
-            st.info(f"股利：{div['note']}")
-
-        # 本益比河流圖
-        st.divider()
-        st.markdown("#### 🌊 本益比河流圖", help=HELP["river"])
-        band = _pe_band(sid)
-        bdf = band.get("df")
-        if isinstance(bdf, pd.DataFrame) and not bdf.empty:
-            mults = band["multiples"]
-            # 由低到高：紅(便宜) -> 綠(貴)（台股慣例：便宜該買=紅、昂貴=綠）
-            shades = ["rgba(231,76,60,0.18)", "rgba(230,126,34,0.18)", "rgba(247,202,24,0.18)",
-                      "rgba(135,196,64,0.18)", "rgba(38,166,91,0.18)"]
-            fig = go.Figure()
-            for i, m in enumerate(mults):
+            st.markdown("#### 🌊 本益比河流圖", help=HELP["river"])
+            band = _pe_band(sid)
+            bdf = band.get("df")
+            if isinstance(bdf, pd.DataFrame) and not bdf.empty:
+                mults = band["multiples"]
+                # 由低到高：紅(便宜) -> 綠(貴)（台股慣例：便宜該買=紅、昂貴=綠）
+                shades = ["rgba(231,76,60,0.18)", "rgba(230,126,34,0.18)", "rgba(247,202,24,0.18)",
+                          "rgba(135,196,64,0.18)", "rgba(38,166,91,0.18)"]
+                fig = go.Figure()
+                for i, m in enumerate(mults):
+                    fig.add_trace(go.Scatter(
+                        x=bdf["date"], y=bdf[f"PER {m}"], name=f"{m} 倍", mode="lines",
+                        line=dict(width=0.6),
+                        fill="tonexty" if i > 0 else None,
+                        fillcolor=shades[min(i, len(shades) - 1)],
+                        hovertemplate=f"{m}倍: " + "%{y:.0f}<extra></extra>",
+                    ))
                 fig.add_trace(go.Scatter(
-                    x=bdf["date"], y=bdf[f"PER {m}"], name=f"{m} 倍", mode="lines",
-                    line=dict(width=0.6),
-                    fill="tonexty" if i > 0 else None,
-                    fillcolor=shades[min(i, len(shades) - 1)],
-                    hovertemplate=f"{m}倍: " + "%{y:.0f}<extra></extra>",
+                    x=bdf["date"], y=bdf["close"], name="收盤價", mode="lines",
+                    line=dict(color="black", width=2),
+                    hovertemplate="收盤: %{y:.0f}<extra></extra>",
                 ))
-            fig.add_trace(go.Scatter(
-                x=bdf["date"], y=bdf["close"], name="收盤價", mode="lines",
-                line=dict(color="black", width=2),
-                hovertemplate="收盤: %{y:.0f}<extra></extra>",
-            ))
-            fig.update_layout(title=f"本益比河流圖（目前 PER {band.get('current_per')} 倍）",
-                              xaxis_title="日期", yaxis_title="股價", hovermode="x unified")
-            st.plotly_chart(fig, width="stretch")
-            st.caption(f"PER 帶倍數（取近三年歷史百分位）：{mults}　｜　目前 PER {band.get('current_per')} 倍")
-        else:
-            st.info("此檔資料不足以繪製本益比河流圖（可能 EPS 為負或歷史太短）。")
+                fig.update_layout(title=f"本益比河流圖（目前 PER {band.get('current_per')} 倍）",
+                                  xaxis_title="日期", yaxis_title="股價", hovermode="x unified")
+                st.plotly_chart(fig, width="stretch")
+                st.caption(f"PER 帶倍數（取近三年歷史百分位）：{mults}　｜　目前 PER {band.get('current_per')} 倍")
+            else:
+                st.info("此檔資料不足以繪製本益比河流圖（可能 EPS 為負或歷史太短）。")
 
-        # 分析師目標價（從新聞擷取，best-effort）
-        st.divider()
-        st.markdown("#### 🎯 分析師目標價", help=HELP["target"])
-        tp_news = _tp_news(sid)  # 專門搜目標價的新聞 + 一般新聞
-        _ref = price.get("close") if isinstance(price, dict) else None
-        tps = _extract_target_prices(tp_news, _ref) if tp_news is not None and not tp_news.empty else []
-        if tps:
-            tdf = pd.DataFrame(tps)
-            st.dataframe(
-                tdf[["date", "來源/券商", "目標價", "title"]],
-                width="stretch", hide_index=True,
-                column_config={"title": "新聞標題"},
-            )
-            st.caption("※ 只列出新聞標題中**有具名券商/機構**者（瑞銀、大摩、高盛、里昂…），泛稱『外資/法人』與媒體名一律不列。仍建議點原文核對。")
+            # 分析師目標價（從新聞擷取，best-effort）
+            st.divider()
+            st.markdown("#### 🎯 分析師目標價", help=HELP["target"])
+            tp_news = _tp_news(sid)  # 專門搜目標價的新聞 + 一般新聞
+            _ref = price.get("close") if isinstance(price, dict) else None
+            tps = _extract_target_prices(tp_news, _ref) if tp_news is not None and not tp_news.empty else []
+            if tps:
+                tdf = pd.DataFrame(tps)
+                st.dataframe(
+                    tdf[["date", "來源/券商", "目標價", "title"]],
+                    width="stretch", hide_index=True,
+                    column_config={"title": "新聞標題"},
+                )
+                st.caption("※ 只列出新聞標題中**有具名券商/機構**者（瑞銀、大摩、高盛、里昂…），泛稱『外資/法人』與媒體名一律不列。仍建議點原文核對。")
+            else:
+                st.info("近期新聞中未擷取到明確目標價數字。註：免費資料源沒有結構化的各券商目標價（屬付費資料），"
+                        "此功能靠新聞擷取，量取決於新聞多寡——填 FinMind token 後新聞變多會更有料。")
         else:
-            st.info("近期新聞中未擷取到明確目標價數字。註：免費資料源沒有結構化的各券商目標價（屬付費資料），"
-                    "此功能靠新聞擷取，量取決於新聞多寡——填 FinMind token 後新聞變多會更有料。")
-    else:
-        st.warning(f"估值資料讀取問題：{val.get('error') if isinstance(val, dict) else val}")
+            st.warning(f"估值資料讀取問題：{val.get('error') if isinstance(val, dict) else val}")
 
 # --- 技術面 ----------------------------------------------------------------
 with tab_tech:
