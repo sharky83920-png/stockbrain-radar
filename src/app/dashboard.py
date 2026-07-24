@@ -553,14 +553,18 @@ if isinstance(price, dict) and "close" in price:
 else:
     st.error(f"查無 {sid} 的價格資料，請確認代號。")
 
-# 我的清單比較總表
+# 我的清單比較總表（按需載入：每檔要抓完整快照 ~9 次 FinMind，開了才花額度）
 if _wl:
     with st.expander(f"📋 我的清單比較總表（{len(_wl)} 檔）", expanded=False):
-        try:
-            st.dataframe(pd.DataFrame([_mini(i["sid"]) for i in _wl]),
-                         hide_index=True, width="stretch")
-        except Exception as e:  # noqa: BLE001
-            st.caption(f"比較總表載入中或部分失敗：{e}")
+        if st.toggle("載入比較資料", key="cmp_load",
+                     help=f"會抓清單 {len(_wl)} 檔的完整快照（約 {len(_wl) * 9} 次 FinMind 請求/日），開啟才載入以節省額度。"):
+            try:
+                st.dataframe(pd.DataFrame([_mini(i["sid"]) for i in _wl]),
+                             hide_index=True, width="stretch")
+            except Exception as e:  # noqa: BLE001
+                st.caption(f"比較總表載入中或部分失敗：{e}")
+        else:
+            st.caption("↑ 打開開關才會載入，平時不耗 FinMind 額度。")
 
 # --- 📅 近期重要事件 行事曆（上半大盤 / 下半本檔）------------------------------
 import datetime as _dt
@@ -1320,12 +1324,18 @@ with tab_map:
     }
     </style>""", unsafe_allow_html=True)
 
-    with st.spinner("載入報價中…"):
-        try:
-            theme_map, changes = td.get_theme_changes()
-        except Exception as _e:  # noqa: BLE001
-            st.error(f"市場地圖載入失敗：{_e}")
-            theme_map, changes = {}, {}
+    # 報價按需載入：地圖結構是本地 JSON 免費，67 檔漲跌幅才吃 FinMind 額度
+    _map_quotes = st.toggle("載入各檔漲跌幅", key="map_quotes",
+                            help="會對地圖上每一檔抓近 5 日收盤價（約 67 次 FinMind 請求/日）。不開也能看產業鏈結構。")
+    try:
+        if _map_quotes:
+            with st.spinner("載入報價中…"):
+                theme_map, changes = td.get_theme_changes()
+        else:
+            theme_map, changes = td.get_theme_structure(), {}
+    except Exception as _e:  # noqa: BLE001
+        st.error(f"市場地圖載入失敗：{_e}")
+        theme_map, changes = {}, {}
 
     if not theme_map:
         st.stop()

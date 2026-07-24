@@ -14,6 +14,7 @@ Step 8 預估現金股利 = 預估 EPS × 分配率
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Optional
 
@@ -37,15 +38,12 @@ def _fmt(val_ntd) -> str:
 
 
 def _roc_to_ad(year_str) -> Optional[int]:
-    """民國年字串(如'112年')→ 西元年。"""
-    try:
-        s = str(year_str).replace("年", "").strip()
-        roc = int(s)
-        if roc > 1911:  # 已是西元年
-            return roc
-        return roc + 1911
-    except Exception:
+    """民國年字串 → 西元年。半年配/季配格式（'111年後半年度'、'113年第1季'）取開頭年份。"""
+    m = re.match(r"\s*(\d+)", str(year_str))
+    if not m:
         return None
+    roc = int(m.group(1))
+    return roc if roc > 1911 else roc + 1911
 
 
 def _series(fs: pd.DataFrame, type_name: str) -> list[tuple[str, float]]:
@@ -150,15 +148,15 @@ def compute(sid: str) -> dict:
                     eps_q["value"] = pd.to_numeric(eps_q["value"], errors="coerce").fillna(0.0)
                     annual_eps = eps_q.groupby("year")["value"].sum().to_dict()
 
-            # 盈餘分配率（近三年）
+            # 盈餘分配率（近三年）。半年配/季配同一年度有多筆 → 先按盈餘所屬年度加總
             records = []
             if "year" in div.columns:
-                div_cash = div[div["cash"] > 0].copy()
-                for _, row in div_cash.iterrows():
+                cash_by_year: dict[int, float] = {}
+                for _, row in div[div["cash"] > 0].iterrows():
                     ad_year = _roc_to_ad(row.get("year"))
-                    if ad_year is None:
-                        continue
-                    cash = float(row["cash"])
+                    if ad_year is not None:
+                        cash_by_year[ad_year] = cash_by_year.get(ad_year, 0.0) + float(row["cash"])
+                for ad_year, cash in cash_by_year.items():
                     eps_y = annual_eps.get(ad_year)
                     if eps_y and eps_y > 0 and (prev_y - 3) <= ad_year <= prev_y:
                         records.append({

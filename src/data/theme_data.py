@@ -48,3 +48,8 @@ def get_theme_changes() -> tuple[dict, dict[str, float]]:
     sids = _all_sids(theme_map)
     changes = {sid: _get_change(sid) for sid in sids}
     return theme_map, changes
+
+
+def get_theme_structure() -> dict:
+    """只讀地圖結構（本地 JSON），不打 FinMind、不耗額度。"""
+    return _load_map()
